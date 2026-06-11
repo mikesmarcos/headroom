@@ -1786,7 +1786,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         allow_origins=cors_origins_for_config(config),
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type", "Authorization"],
+        allow_headers=["Content-Type", "Authorization", "X-Headroom-Project", "X-Headroom-Stack"],
     )
 
     # X-Headroom-Stack: SDK adapters (TS openai/anthropic/etc.) tag their
