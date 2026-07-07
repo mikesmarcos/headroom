@@ -500,6 +500,19 @@ def test_from_stream_derives_attempted_input_tokens_from_optimized_plus_saved() 
     assert o.attempted_input_tokens == 1000
 
 
+def test_from_stream_derives_underreported_tokens_saved_from_token_delta() -> None:
+    """OpenAI-compatible streaming providers can report the optimized
+    input token count while the call site still has ``tokens_saved=0``.
+    The outcome contract is provider-agnostic: savings is at least
+    ``original_tokens - optimized_tokens``.
+    """
+    o = RequestOutcome.from_stream(
+        **_stream_kwargs(original_tokens=1000, optimized_tokens=700, tokens_saved=0)
+    )
+    assert o.tokens_saved == 300
+    assert o.attempted_input_tokens == 1000
+
+
 def test_from_stream_counts_messages_from_body() -> None:
     """``num_messages`` powers PERF ``msgs=N``. Computing it from the
     body in one place prevents the historical drift where some sites

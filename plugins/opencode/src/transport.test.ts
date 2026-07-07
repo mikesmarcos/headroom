@@ -105,6 +105,30 @@ describe("Headroom OpenCode transport", () => {
     }
   });
 
+  it("routes fetch Anthropic messages paths through /v1/messages with proxy base and normalized-path header", async () => {
+    const proxyTargets = ["http://127.0.0.1:8787", "http://127.0.0.1:8787/v1"];
+    const upstreamPath = "/zen/go/v1/messages";
+    for (const proxyUrl of proxyTargets) {
+      const proxyOrigin = new URL(proxyUrl).origin;
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn(async (..._args: FetchCall) => new Response("ok"));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      installHeadroomTransport({ proxyUrl });
+
+      await fetch(`https://opencode.ai${upstreamPath}`, { method: "POST", headers: { "content-type": "application/json" } });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][0]).toEqual(new URL(`${proxyOrigin}/v1/messages`));
+      const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
+      expect(headers.get("x-headroom-base-url")).toBe("https://opencode.ai");
+      expect(headers.get("x-headroom-original-path")).toBe(upstreamPath);
+
+      globalThis.fetch = originalFetch;
+      uninstallHeadroomTransport();
+    }
+  });
+
   it("routes external fetch calls through the proxy without pre-registering providers", async () => {
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn(async (..._args: FetchCall) => new Response("ok"));
