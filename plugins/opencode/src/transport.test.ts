@@ -20,6 +20,12 @@ type SeenRequest = {
   body: string;
 };
 
+function configuredProxyUrl(pathPrefix: string = ""): string {
+  const host = process.env.HEADROOM_HOST || "127.0.0.1";
+  const port = process.env.HEADROOM_PORT || "8787";
+  return `http://${host}:${port}${pathPrefix}`;
+}
+
 function proxyServer(pathPrefix: string = "/v1"): Promise<{
   url: string;
   seen: SeenRequest[];
@@ -106,7 +112,7 @@ describe("Headroom OpenCode transport", () => {
   });
 
   it("routes fetch Anthropic messages paths through /v1/messages with proxy base and normalized-path header", async () => {
-    const proxyTargets = ["http://127.0.0.1:8787", "http://127.0.0.1:8787/v1"];
+    const proxyTargets = [configuredProxyUrl(), configuredProxyUrl("/v1")];
     const upstreamPath = "/zen/go/v1/messages";
     for (const proxyUrl of proxyTargets) {
       const proxyOrigin = new URL(proxyUrl).origin;
