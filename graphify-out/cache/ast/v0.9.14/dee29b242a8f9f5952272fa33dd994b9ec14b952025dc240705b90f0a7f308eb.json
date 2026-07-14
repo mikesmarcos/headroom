@@ -1,0 +1,1 @@
+{"nodes": [{"id": "pkg_headroom_oauth2", "label": "headroom-oauth2", "file_type": "code", "type": "package", "ecosystem": "python", "source_file": "plugins/headroom-oauth2/pyproject.toml", "source_location": "L1", "version": "0.1.0"}], "edges": []}

@@ -1,0 +1,28 @@
+# .graphifyignore
+node_modules/
+dist/
+*.generated.py
+
+# only index src/, ignore everything else
+*
+!REALIGNMENT/
+!REALIGNMENT/**
+!crates/
+!crates/**
+!docker/
+!docker/**
+!docker-bake.hcl
+!docker-compose.yml
+!docs/
+!docs/**
+!e2e/
+!e2e/**
+!headroom/
+!headroom/**
+!sbom/
+!sbom/**
+!scripts/
+!scripts/**
+!uv.lock
+!wiki/
+!wiki/**
