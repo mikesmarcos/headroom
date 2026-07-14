@@ -69,6 +69,7 @@ from headroom.proxy.auth_mode import (
 from headroom.proxy.compression_decision import CompressionDecision
 from headroom.proxy.cost import _summarize_transforms, header_safe_transforms
 from headroom.proxy.handlers._debug_dump import _debug_dump_mode, _redact_debug_value
+from headroom.proxy.image_isolation import run_image_compression_isolated
 from headroom.proxy.outcome import RequestOutcome
 from headroom.proxy.passthrough import (
     custom_base_passthrough_telemetry as _custom_base_passthrough_telemetry,
@@ -95,6 +96,33 @@ def _codex_ws_compression_timeout_seconds() -> float:
 _WS_ALLOWED_ORIGINS_ENV = "HEADROOM_WS_ORIGINS"
 _CORS_ALLOWED_ORIGINS_ENV = "HEADROOM_CORS_ORIGINS"
 _CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
+# Codex mirrors the responses-lite request header into the response.create
+# frame body under client_metadata; upstream rejects gpt-5.x when it is
+# truthy. Stripping the WS handshake header alone is insufficient
+# (headroomlabs-ai/headroom#1523) — the frame-body mirror must be removed too.
+_CODEX_LITE_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite"
+
+
+def _strip_codex_lite_metadata(raw_msg: str) -> str:
+    """Remove the Codex responses-lite marker mirrored into a response.create
+    frame's client_metadata. Fail-safe: returns raw_msg unchanged on any
+    parse issue or when the marker is absent."""
+    try:
+        frame = json.loads(raw_msg)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return raw_msg
+    if not isinstance(frame, dict):
+        return raw_msg
+    changed = False
+    for container in (frame, frame.get("response")):
+        if isinstance(container, dict):
+            cm = container.get("client_metadata")
+            if isinstance(cm, dict) and _CODEX_LITE_METADATA_KEY in cm:
+                del cm[_CODEX_LITE_METADATA_KEY]
+                changed = True
+    return json.dumps(frame) if changed else raw_msg
+
+
 _OPENAI_CHAT_COMPLETIONS_PATH = "/chat/completions"
 _OPENAI_RESPONSES_PATH = "/responses"
 _OPENAI_ORIGINAL_PATH_HEADER = "x-headroom-original-path"
@@ -190,6 +218,14 @@ def _resolve_openai_upstream_base(request_headers: dict[str, str]) -> str | None
     normalized = _normalize_origin(raw_base_url)
     if normalized is None:
         return None
+
+    # _normalize_origin drops the path; re-attach it so a custom upstream served
+    # from a sub-path (e.g. https://host/api/v1) is preserved rather than routed
+    # to the bare origin.
+    path = (urlparse(raw_base_url.strip()).path or "").rstrip("/")
+    if path:
+        normalized = f"{normalized}{path}"
+
     if urlparse(normalized).scheme not in {"http", "https"}:
         return None
     return normalized
@@ -727,6 +763,83 @@ def _responses_input_to_waste_messages(instructions: Any, input_data: Any) -> li
     return messages
 
 
+def _responses_input_to_learner_messages(
+    instructions: Any,
+    input_data: Any,
+) -> list[dict[str, Any]]:
+    """Normalize Responses input for ``TrafficLearner``.
+
+    The learner already understands Anthropic-style ``tool_use`` / ``tool_result``
+    blocks. Converting at the provider boundary keeps that extraction logic shared
+    without teaching the learner about every OpenAI transport shape.
+    """
+    messages: list[dict[str, Any]] = []
+    if isinstance(instructions, str) and instructions:
+        messages.append({"role": "system", "content": instructions})
+    if isinstance(input_data, str):
+        if input_data:
+            messages.append({"role": "user", "content": input_data})
+        return messages
+    if not isinstance(input_data, list):
+        return messages
+
+    for item in input_data:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            arguments = item.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    parsed_arguments = json.loads(arguments)
+                except (json.JSONDecodeError, TypeError):
+                    parsed_arguments = {}
+                arguments = parsed_arguments if isinstance(parsed_arguments, dict) else {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": item.get("call_id", ""),
+                            "name": item.get("name", "unknown"),
+                            "input": arguments,
+                        }
+                    ],
+                }
+            )
+            continue
+        if item_type in _RESPONSES_OUTPUT_ITEM_TYPES:
+            output = item.get("output", "")
+            output_text = _responses_part_text(output)
+            if not output_text and output not in (None, ""):
+                output_text = json.dumps(output, ensure_ascii=False, default=str)
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": item.get("call_id", ""),
+                            "content": output_text,
+                            "is_error": bool(item.get("is_error"))
+                            or item.get("status") in {"failed", "error", "incomplete"},
+                        }
+                    ],
+                }
+            )
+            continue
+        text = _responses_part_text(item.get("content"))
+        if text:
+            role = item.get("role")
+            messages.append(
+                {"role": role if isinstance(role, str) and role else "user", "content": text}
+            )
+    return messages
+
+
 def _has_headroom_retrieve_tool_responses(tools: Any) -> bool:
     """Return True when the Responses API tool list includes CCR retrieve.
 
@@ -785,6 +898,7 @@ def _dedup_responses_output_items(
     items: list[dict[str, Any]],
     output_types: frozenset[str],
     count_tokens: Any = None,
+    protected_call_ids: set[str] | None = None,
 ) -> tuple[int, int]:
     """Cross-turn verbatim de-dup over Responses tool-output items (mutates in place).
 
@@ -814,7 +928,17 @@ def _dedup_responses_output_items(
         out = item.get("output")
         if isinstance(out, str) and out:
             locs.append(i)
-            blocks.append(DedupBlock(text=out, turn=i, protected=False))
+            blocks.append(
+                DedupBlock(
+                    text=out,
+                    turn=i,
+                    protected=bool(
+                        isinstance(item.get("call_id"), str)
+                        and protected_call_ids
+                        and item.get("call_id") in protected_call_ids
+                    ),
+                )
+            )
     if len(blocks) < 2:
         return 0, 0
 
@@ -1167,6 +1291,42 @@ class OpenAIHandlerMixin:
             while len(cache) > _OPENAI_RESPONSES_UNIT_CACHE_MAX_ENTRIES:
                 cache.popitem(last=False)
 
+    async def _observe_openai_responses_traffic(
+        self,
+        body: dict[str, Any],
+        *,
+        request_id: str,
+    ) -> None:
+        """Feed one Responses HTTP request into the live traffic learner."""
+        traffic_learner = getattr(self, "traffic_learner", None)
+        if traffic_learner is None:
+            return
+        try:
+            memory_handler = getattr(self, "memory_handler", None)
+            if (
+                traffic_learner._backend is None
+                and memory_handler
+                and memory_handler.initialized
+                and memory_handler.backend
+            ):
+                traffic_learner.set_backend(memory_handler.backend)
+
+            learner_messages = _responses_input_to_learner_messages(
+                body.get("instructions"),
+                body.get("input", ""),
+            )
+            tool_results = traffic_learner.extract_tool_results_from_messages(learner_messages)
+            for tool_result in tool_results[-5:]:
+                await traffic_learner.on_tool_result(
+                    tool_name=tool_result["tool_name"],
+                    tool_input=tool_result["input"],
+                    tool_output=tool_result["output"],
+                    is_error=tool_result["is_error"],
+                )
+            await traffic_learner.on_messages(learner_messages)
+        except Exception as exc:
+            logger.debug("[%s] Traffic learner (responses): %s", request_id, exc)
+
     @staticmethod
     def _headroom_bypass_enabled(headers: Any) -> bool:
         """Return True when inbound headers request full passthrough."""
@@ -1352,7 +1512,11 @@ class OpenAIHandlerMixin:
         # mirroring ContentRouter's policy. exclude_tools already contains both
         # original and lowercased name variants (see _parse_exclude_tools), but
         # we also test the lowercased name defensively for case-insensitivity.
-        from headroom.config import DEFAULT_EXCLUDE_TOOLS, is_tool_excluded
+        from headroom.config import (
+            DEFAULT_EXCLUDE_TOOLS,
+            DEFAULT_VERBATIM_EXCLUDE_TOOLS,
+            is_tool_excluded,
+        )
 
         router_exclude_tools = getattr(router.config, "exclude_tools", None)
         effective_exclude_tools = (
@@ -1362,6 +1526,11 @@ class OpenAIHandlerMixin:
             call_id
             for call_id, fn_name in function_name_by_call_id.items()
             if is_tool_excluded(fn_name, effective_exclude_tools)
+        }
+        verbatim_excluded_call_ids: set[str] = {
+            call_id
+            for call_id, fn_name in function_name_by_call_id.items()
+            if is_tool_excluded(fn_name, DEFAULT_VERBATIM_EXCLUDE_TOOLS)
         }
 
         timing_sink: dict[str, float] = timing if timing is not None else {}
@@ -1408,6 +1577,20 @@ class OpenAIHandlerMixin:
                         )
                     continue
                 if isinstance(call_id, str) and call_id in excluded_call_ids:
+                    if call_id in verbatim_excluded_call_ids:
+                        if debug_enabled:
+                            extraction_debug.append(
+                                {
+                                    "index": idx,
+                                    "eligible": False,
+                                    "reason": "exclude_tools_verbatim",
+                                    "item_type": item_type,
+                                    "call_id": call_id,
+                                    "tool_name": function_name_by_call_id.get(call_id),
+                                    "item": item,
+                                }
+                            )
+                        continue
                     # Protected from lossy compression — but grep/log/json output
                     # can still be losslessly compacted. Reuse the router helper
                     # so the Responses path matches the chat/Anthropic behavior.
@@ -1804,7 +1987,10 @@ class OpenAIHandlerMixin:
         # chat path (ContentRouter._cross_turn_dedup_messages runs last there too).
         if getattr(router, "_cross_turn_dedup_enabled", False):
             dd_folded, dd_saved = _dedup_responses_output_items(
-                updated_items, self.OPENAI_RESPONSES_OUTPUT_TYPES, tokenizer.count_text
+                updated_items,
+                self.OPENAI_RESPONSES_OUTPUT_TYPES,
+                tokenizer.count_text,
+                protected_call_ids=verbatim_excluded_call_ids,
             )
             if dd_folded:
                 modified = True
@@ -2290,18 +2476,17 @@ class OpenAIHandlerMixin:
             try:
                 compressor = _get_image_compressor()
                 if compressor and compressor.has_images(messages):
-                    # Offload CPU-bound image compression onto the bounded
-                    # executor (same as text compression); inline blocked the loop.
-                    messages = await self._run_compression_in_executor(
-                        lambda: compressor.compress(messages, provider="openai"),
+                    messages, image_result = await run_image_compression_isolated(
+                        messages,
+                        provider="openai",
                         timeout=COMPRESSION_TIMEOUT_SECONDS,
                     )
-                    if compressor.last_result:
+                    if image_result is not None:
                         logger.info(
-                            f"[{request_id}] Image: {compressor.last_result.technique.value} "
-                            f"({compressor.last_result.savings_percent:.0f}% saved, "
-                            f"{compressor.last_result.original_tokens} → "
-                            f"{compressor.last_result.compressed_tokens} tokens)"
+                            f"[{request_id}] Image: {image_result['technique']} "
+                            f"({image_result['savings_percent']:.0f}% saved, "
+                            f"{image_result['original_tokens']} → "
+                            f"{image_result['compressed_tokens']} tokens)"
                         )
             except Exception as e:
                 # Image compression is best-effort — fail open on timeout/error and
@@ -3547,14 +3732,13 @@ class OpenAIHandlerMixin:
 
                 # OpenAI has no write penalty — uncached = total - cached
                 uncached_input_tokens = max(0, total_input_tokens - cache_read_tokens)
-                effective_tokens_saved = max(tokens_saved, original_tokens - total_input_tokens, 0)
 
                 # (record_tokens clamps negative savings to 0 universally — the
                 # forwarded request is never larger than the original.)
                 if self.cost_tracker:
                     self.cost_tracker.record_tokens(
                         model,
-                        effective_tokens_saved,
+                        tokens_saved,
                         optimized_tokens,
                         cache_read_tokens=cache_read_tokens,
                         cache_write_tokens=cache_write_tokens,
@@ -3646,8 +3830,8 @@ class OpenAIHandlerMixin:
                         original_tokens=original_tokens,
                         optimized_tokens=total_input_tokens,
                         output_tokens=output_tokens,
-                        tokens_saved=effective_tokens_saved,
-                        attempted_input_tokens=total_input_tokens + effective_tokens_saved,
+                        tokens_saved=tokens_saved,
+                        attempted_input_tokens=total_input_tokens + tokens_saved,
                         cache_read_tokens=cache_read_tokens,
                         cache_write_tokens=cache_write_tokens,
                         uncached_input_tokens=uncached_input_tokens,
@@ -3666,10 +3850,10 @@ class OpenAIHandlerMixin:
                     )
                 )
 
-                if effective_tokens_saved > 0:
+                if tokens_saved > 0:
                     logger.info(
                         f"[{request_id}] {model}: {original_tokens:,} → {optimized_tokens:,} "
-                        f"(saved {effective_tokens_saved:,} tokens)"
+                        f"(saved {tokens_saved:,} tokens)"
                     )
 
                 # Remove compression headers since httpx already decompressed the response
@@ -3836,7 +4020,11 @@ class OpenAIHandlerMixin:
         headers.pop("content-encoding", None)
         tags = extract_tags(headers)
         client = classify_client(headers)
-        outcome_provider = _openai_outcome_provider(request.headers, client)
+
+        # Learn from the original client payload before memory context or
+        # compression mutates it. This mirrors the Anthropic ingestion path.
+        await self._observe_openai_responses_traffic(body, request_id=request_id)
+
         # PR-A5 (P5-49): strip internal x-headroom-* from upstream-bound
         # headers AFTER `_extract_tags` reads them. Memory user-id reads
         # `request.headers` below.
@@ -4133,7 +4321,6 @@ class OpenAIHandlerMixin:
         headers, is_chatgpt_auth = _resolve_codex_routing_headers(headers)
         if is_chatgpt_auth:
             client = "codex"
-            outcome_provider = "openai"
 
         # Route to correct endpoint based on auth mode.
         # ChatGPT session auth (codex login) uses chatgpt.com, not api.openai.com.
@@ -4360,7 +4547,6 @@ class OpenAIHandlerMixin:
                     body_mutated=body_mutation_tracker.mutated,
                     mutation_reasons=body_mutation_tracker.reasons,
                     waste_signals=waste_signals_dict,
-                    outcome_provider=outcome_provider,
                 )
             else:
                 headers = await apply_copilot_api_auth(headers, url=url)
@@ -4647,7 +4833,7 @@ class OpenAIHandlerMixin:
                 await self._record_request_outcome(
                     RequestOutcome(
                         request_id=request_id,
-                        provider=outcome_provider,
+                        provider="openai",
                         model=model,
                         status_code=response.status_code,
                         original_tokens=effective_original_tokens,
@@ -5851,7 +6037,7 @@ class OpenAIHandlerMixin:
 
             if ws_connected:
                 async with upstream:
-                    await upstream.send(first_msg_raw)
+                    await upstream.send(_strip_codex_lite_metadata(first_msg_raw))
 
                     # Unit 3: flag the upstream side flips on seeing
                     # ``response.completed`` so the outer cause
@@ -6224,7 +6410,7 @@ class OpenAIHandlerMixin:
                                         "transforms_applied": transforms_applied,
                                     },
                                 )
-                                await upstream.send(msg)
+                                await upstream.send(_strip_codex_lite_metadata(msg))
                         except asyncio.CancelledError:
                             # Explicit cancel from the outer
                             # orchestrator — re-raise so
@@ -7514,6 +7700,21 @@ class OpenAIHandlerMixin:
         except ClientDisconnect:
             logger.debug("Client disconnected during body read for passthrough")
             return Response(status_code=204)
+
+        # Hermes owns its scoped coding-agent protocols; keep that adapter out of
+        # the generic OpenAI passthrough handler.
+        from headroom.providers.hermes import compress_scoped_passthrough_body
+
+        optimize_enabled = bool(getattr(getattr(self, "config", None), "optimize", False))
+        original_body = body
+        body = compress_scoped_passthrough_body(
+            path,
+            body,
+            optimize=optimize_enabled,
+            bypass=_headroom_bypass_enabled(request.headers),
+        )
+        if body is not original_body:
+            headers["content-length"] = str(len(body))
 
         headers = await apply_copilot_api_auth(headers, url=url)
         # Cloudflare bot-management challenges our HTTP/2 fingerprint on

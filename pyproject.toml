@@ -212,6 +212,8 @@ strands = [
 mcp = [
     "mcp>=1.0.0",
     "httpx>=0.24.0",
+    "starlette>=0.27.0",
+    "uvicorn>=0.23.0,<1.0",
 ]
 # Voice filler detection
 voice = [
@@ -278,6 +280,7 @@ dev = [
     "sentence-transformers>=2.2.0,<6.0",
     "numpy>=1.24.0",
     "openpyxl>=3.1.0",  # exercises spreadsheet_ingest (.xlsx) in the test suite
+    "respx>=0.20.0",    # HTTP mock transport for passthrough handler tests
 ]
 # All optional dependencies (everything you need)
 #
@@ -291,6 +294,25 @@ dev = [
 # headroom-ai[benchmark]`.
 all = [
     "headroom-ai[proxy,code,ml,memory,relevance,image,reports,otel,evals,voice,html,mcp,spreadsheet]",
+]
+# Sandbox: a lean proxy with ALL torch-free capability — for running Headroom in
+# a locked-down/low-resource sandbox and offloading heavy ML elsewhere.
+#
+# = [all] MINUS:
+#   - image  (SigLIP/OCR — excluded by request)
+#   - ml     (torch — the PyTorch Kompress backend; ONNX path in [proxy] still
+#             runs Kompress locally with no torch, or offload it entirely via
+#             HEADROOM_KOMPRESS_ENDPOINT)
+#   - voice  (excluded by request)
+#   - memory + evals  (both pull sentence-transformers -> torch, i.e. the very
+#             ML weight a sandbox avoids; evals is a dev/test harness, not a
+#             runtime feature). Opt back in explicitly if you accept torch:
+#             pip install headroom-ai[sandbox,memory]
+#
+# Everything kept here is torch-free: code-aware compression (tree-sitter),
+# embedding relevance (fastembed), HTML/spreadsheet ingestion, reports, OTel.
+sandbox = [
+    "headroom-ai[proxy,code,relevance,reports,otel,html,mcp,spreadsheet]",
 ]
 
 [project.scripts]
@@ -331,7 +353,9 @@ constraint-dependencies = [
     "lxml-html-clean>=0.4.5",
     # CVE-2026-54293 (High) — transitive via rouge-score/lm-eval; fix at 3.10.0
     "nltk>=3.10.0",
-    # PYSEC-2025-32688 / GHSA-2x79-9x99-4w36 (High) — transitive via pip, wheel build; fix at 83.0.0
+    # CVE-2026-5241 (High) — direct optional dep for proxy/ml/voice; fix at 5.5.0
+    "transformers>=5.5.0",
+    # PYSEC-2026-3447 — transitive dependency; fix at 83.0.0
     "setuptools>=83.0.0",
 ]
 
