@@ -54,7 +54,7 @@ dependencies = [
     # ImportError-guarded. Marking it 3.14-optional lets headroom install on Python 3.14
     # (core compression + the Anthropic proxy path never import litellm). See GH #956.
     "litellm>=1.86.2,<2.0; python_version < '3.14'",  # model registry, pricing, providers (lazy)
-    "click>=8.1.0",               # CLI framework
+    "click>=8.3.3",               # CLI framework
     "rich>=13.0.0",               # Rich terminal output
     "opentelemetry-api>=1.24.0",  # Safe no-op OTEL API for instrumentation
     "ast-grep-cli>=0.30.0",       # AST-aware code slicing (CodeCompressor); binary wheel
@@ -76,7 +76,7 @@ proxy = [
     "zstandard>=0.20.0",          # Decompress zstd request bodies (Codex, etc.)
     "websockets>=13.0",           # WebSocket proxy for /v1/responses (Codex gpt-5.4+)
     "onnxruntime>=1.16.0",        # Kompress ONNX INT8 text compression (no torch needed)
-    "transformers>=4.30.0,<6.0",  # Tokenizer only (for Kompress)
+    "transformers>=5.5.0,<6.0",  # Tokenizer only (for Kompress)
     "watchdog>=4.0.0",            # File watcher for live code graph reindexing (--code-graph)
     "sqlite-vec>=0.1.6",          # Vector index for memory (--memory). Lightweight, no torch.
 ]
@@ -105,7 +105,7 @@ ml = [
     # PyTorch does not publish wheels for macOS 15 x86_64 at this floor, which
     # makes `headroom-ai[all]` unsatisfiable on Intel Macs (#1931).
     "torch>=2.12.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "transformers>=4.30.0,<6.0",
+    "transformers>=5.5.0,<6.0",
     # transformers >= 5.x requires huggingface-hub >= 1.5.0,<2.0; pinning
     # the floor here prevents Kompress from silently falling back to
     # "unavailable" when a sibling install (e.g. `pip install
@@ -165,7 +165,7 @@ relevance = [
 # `headroom/image/compressor.py` adapts both API shapes at runtime via
 # a try/except cascade. See issue #372 for context.
 image = [
-    "pillow>=10.0.0",
+    "pillow>=12.3.0",
     "sentencepiece>=0.1.99",  # Required by SigLIP tokenizer (SiglipTokenizer)
     # Python 3.6–3.12: keep the proven ORT-bundled package directly.
     # ~15 MB ONNX models auto-downloaded on first use.
@@ -216,7 +216,7 @@ mcp = [
 # Voice filler detection
 voice = [
     "onnxruntime>=1.16.0",
-    "transformers>=4.30.0,<6.0",
+    "transformers>=5.5.0,<6.0",
     "torch>=2.12.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
 ]
 # Voice training (includes voice deps + training extras)
@@ -331,6 +331,8 @@ constraint-dependencies = [
     "lxml-html-clean>=0.4.5",
     # CVE-2026-54293 (High) — transitive via rouge-score/lm-eval; fix at 3.10.0
     "nltk>=3.10.0",
+    # PYSEC-2025-32688 / GHSA-2x79-9x99-4w36 (High) — transitive via pip, wheel build; fix at 83.0.0
+    "setuptools>=83.0.0",
 ]
 
 # Pin the project's package index to public PyPI. Without this, `uv lock`

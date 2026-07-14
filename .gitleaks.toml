@@ -13,9 +13,12 @@ paths = [
   '''.*package-lock\.json$''',
   '''pnpm-lock\.yaml$''',
   # Test / benchmark / parity trees use synthetic JWTs and API keys by design.
-  '''(^|/)tests/''',
-  '''(^|/)benchmarks/''',
-  '''crates/.*/(tests|benches)/''',
+    '''(^|/)tests/''',
+    '''(^|/)benchmarks/''',
+    '''crates/.*/(tests|benches)/''',
+    # Generated graph cache: AST/semantic hashes in manifest.json
+    # trigger square-access-token false positives (fixed-length hex).
+    '''graphify-out/.*''',
 ]
 # Verified non-secret strings that appear in production source. Kept narrow
 # (exact tokens) so a genuine secret in these files would still be caught.
