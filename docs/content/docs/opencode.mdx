@@ -172,6 +172,12 @@ The installer must **not** create `package.json`, `package-lock.json`, or
 `node_modules/` under the OpenCode config directory. The plugin artifact is a
 pre-built JavaScript file, not an npm project.
 
+Operational runtime can reference the managed artifact with either
+`HEADROOM_OPENCODE_PLUGIN_PATH=/opt/headroom/opencode-plugin/package/dist/entry.opencode.js`
+or `HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR=/opt/headroom/opencode-plugin/package`.
+If either variable is set but the entry file is missing, Headroom fails with an
+explicit install/rebuild error instead of falling back to a development checkout.
+
 ## Programmatic Config Helpers
 
 The package also exports helpers for custom integrations:
