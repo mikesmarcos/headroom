@@ -96,6 +96,12 @@ class DeploymentManifest:
     provider_mode: str
     targets: list[str]
     port: int
+    # Client-reachable host used by generated tool config; never a bind wildcard.
+    # Persistent installs (service / task / Docker) bind the proxy to
+    # ``127.0.0.1`` and always emit a loopback host here — wrap-time clients
+    # that want a non-loopback host resolve it through
+    # :func:`headroom.providers.opencode.runtime.headroom_client_host` at the
+    # wrap entry point instead of reusing the manifest value.
     host: str
     backend: str
     anyllm_provider: str | None = None

@@ -77,6 +77,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+* **install/planner:** `build_manifest` is now explicitly documented as
+  loopback-only for persistent installs. The planner always binds the
+  proxy to `127.0.0.1` and emits a loopback `host` on the
+  `DeploymentManifest`, regardless of the caller's `HEADROOM_HOST`. This is
+  intentional and asymmetric with wrap-time, where
+  `headroom.providers.opencode.runtime.headroom_client_host` honors
+  `HEADROOM_HOST` for wrapped tools on remote hosts; persistent installs
+  are scoped to the host running the supervisor, so honoring a wildcard
+  there would risk generating a baseURL no local tool could reach. The
+  `DeploymentManifest.host` field comment now spells out the same
+  asymmetry and points readers at the wrap-time resolver if they need a
+  non-loopback host.
+* **opencode:** native plugin loading now requires an explicitly configured
+  stable artifact path instead of auto-discovering
+  `plugins/opencode/dist/entry.opencode.js` from a mutable development checkout.
+  Provider `baseURL` routing remains the default operational integration and
+  continues to work without the native plugin; generated OpenCode proxy URLs now
+  honor `HEADROOM_HOST` instead of hard-coding `127.0.0.1`
+  ([#14](https://github.com/mikesmarcos/headroom/issues/14)).
+  The low-level Python helpers `proxy_base_url`, `build_opencode_config_content`,
+  `headroom_provider_entry`, and `inject_opencode_provider_config` now require an
+  explicit client-reachable host so URL generation cannot silently depend on
+  process environment state. The persistent-install code path now writes the
+  `headroom` provider's explicit `models` map (via `headroom_provider_entry`)
+  so `headroom/<id>` resolves on a fresh install without a prior interactive
+  provider registration.
 * **telemetry:** anonymous usage telemetry is now **opt-in** (off by default) instead of opt-out. Nothing is collected or sent unless you set `HEADROOM_TELEMETRY=on` or pass `--telemetry` to `headroom proxy` / `headroom install apply`. `is_telemetry_enabled()` is fail-closed — only explicit on-values (`on`/`true`/`1`/`yes`/`enable`/`enabled`) enable it; unset, empty, or unrecognized values stay disabled. The existing `--no-telemetry` flag and `HEADROOM_TELEMETRY=off` remain accepted for back-compat, and install manifests now write the `HEADROOM_TELEMETRY` value explicitly so generated deployments are unambiguous.
 * **ccr:** `headroom_stats` now labels its formatted proxy output as a rolling/window-scoped session and adds a lifetime savings section from `/stats persistent_savings.lifetime` when present, while keeping existing summary structure and fallback JSON output behavior.
 

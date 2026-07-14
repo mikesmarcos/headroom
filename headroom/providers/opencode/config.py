@@ -1,4 +1,12 @@
-"""OpenCode config file helpers for wrap and persistent install."""
+"""OpenCode config file helpers for wrap and persistent install.
+
+The helpers in this module are pure: they format hosts into URL authorities
+and render provider blocks, but they do NOT read the process environment.
+Runtime host resolution (the bind-host-to-client-host rewrite and the
+``HEADROOM_HOST`` lookup) lives in :mod:`headroom.providers.opencode.runtime`
+and is performed once at the entry point so the canonical host can be passed
+down as a plain string.
+"""
 
 from __future__ import annotations
 
@@ -60,12 +68,33 @@ HEADROOM_OPENCODE_MODELS: dict[str, Any] = {
 }
 
 
-def headroom_provider_entry(port: int) -> dict[str, Any]:
-    """Return the `headroom` provider block pointed at the local proxy."""
+def headroom_url_authority(host: str) -> str:
+    """Return ``host`` formatted for use in an HTTP URL authority.
+
+    Brackets IPv6 literals (anything containing a colon) that are not already
+    bracketed. Leaves IPv4 and DNS names untouched. ``host`` must be a
+    canonical, client-reachable host string — no env reads, no wildcard
+    rewrites happen here. See
+    :func:`headroom.providers.opencode.runtime.headroom_client_host` for the
+    bind-host-to-client-host conversion.
+    """
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def headroom_provider_entry(port: int, *, host: str) -> dict[str, Any]:
+    """Return the `headroom` provider block pointed at the local proxy.
+
+    ``host`` must be the canonical, client-reachable proxy host (the value
+    returned by
+    :func:`headroom.providers.opencode.runtime.headroom_client_host`). This
+    function performs no environment lookups and does not rewrite wildcards.
+    """
     return {
         "npm": "@ai-sdk/openai-compatible",
         "name": "Headroom Proxy",
-        "options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+        "options": {"baseURL": f"http://{headroom_url_authority(host)}:{port}/v1"},
         "models": HEADROOM_OPENCODE_MODELS,
     }
 
@@ -118,17 +147,6 @@ def strip_opencode_headroom_blocks(content: str, *, remove_mcp: bool = True) -> 
     return content.strip()
 
 
-def _render_provider_block(port: int) -> str:
-    """Render a Headroom provider block as a JSON comment-wrapped snippet."""
-    provider = {"headroom": headroom_provider_entry(port)}
-    lines = [
-        _PROVIDER_MARKER_START,
-        f'"provider": {json.dumps(provider, indent=2)},',
-        _PROVIDER_MARKER_END,
-    ]
-    return "\n".join(lines)
-
-
 def _parse_json_loose(text: str) -> dict[str, Any]:
     """Parse JSON text, stripping line comments (// ...) when needed.
 
@@ -164,28 +182,15 @@ def _inject_key_into_json(data: dict[str, Any], key: str, value: Any) -> dict[st
     return data
 
 
-def append_headroom_plugin(config: dict[str, object]) -> bool:
-    """Append the optional OpenCode plugin entry if it is not already present."""
-    plugin = config.get("plugin")
-    if plugin is None:
-        config["plugin"] = [HEADROOM_OPENCODE_PLUGIN]
-        return True
-
-    if not isinstance(plugin, list):
-        return False
-
-    for entry in plugin:
-        if entry == HEADROOM_OPENCODE_PLUGIN:
-            return False
-        if isinstance(entry, list) and entry and entry[0] == HEADROOM_OPENCODE_PLUGIN:
-            return False
-
-    plugin.append(HEADROOM_OPENCODE_PLUGIN)
-    return True
-
-
-def inject_opencode_provider_config(port: int) -> None:
+def inject_opencode_provider_config(port: int, *, host: str) -> None:
     """Inject a Headroom model provider into OpenCode's config file.
+
+    ``host`` must be the canonical, client-reachable proxy host (the value
+    returned by
+    :func:`headroom.providers.opencode.runtime.headroom_client_host`). This
+    function performs no environment lookups and does not rewrite wildcards;
+    callers are responsible for resolving the canonical host once at the
+    entry point.
 
     Safe to call multiple times — the injected block is fully replaced on
     each call, so re-running with a different ``port`` updates the config.
@@ -213,7 +218,7 @@ def inject_opencode_provider_config(port: int) -> None:
             data = _parse_json_loose(content)
 
         # Merge provider into the JSON data structure.
-        provider = {"headroom": headroom_provider_entry(port)}
+        provider = {"headroom": headroom_provider_entry(port, host=host)}
         data = _inject_key_into_json(data, "provider", provider)
 
         # Write back as formatted JSON (opencode uses standard JSON with comments).

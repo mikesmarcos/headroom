@@ -113,6 +113,65 @@ export default async function plugin(input) {
 
 Use this plugin when OpenCode should intercept provider traffic in-process. Use `headroom wrap opencode` when you want the CLI to manage the proxy, config injection, MCP registration, backups, and unwrap behavior.
 
+## Plugin Artifact Contract
+
+The selected stable artifact source for the native OpenCode plugin is the **versioned npm package `headroom-opencode`**. Release automation must publish that package before installers enable the native plugin from it.
+
+Provider `baseURL` routing (the `headroom` provider injected by `wrap opencode` and persistent install) is the default supported operational integration. The native plugin is optional and provides in-process transport interception for providers that do not support `baseURL` configuration.
+
+### Why operational OpenCode must not load the plugin from a dev checkout
+
+Operational OpenCode must not reference a built plugin at
+`plugins/opencode/dist/entry.opencode.js` relative to a Headroom repository
+checkout. That would couple OpenCode's runtime behavior to the mutable Headroom
+working tree — changing, moving, or deleting the repo would break the installed
+OpenCode session. This was the root cause of a prior operational incident where
+an npm `file:` dependency in `~/.config/opencode` linked OpenCode to the
+development checkout.
+
+**Rules:**
+- Provider `baseURL` routing is the default integration and works without any
+  npm install.
+- The native plugin may only be referenced from a published `headroom-opencode`
+  package version (immutable, path-agnostic), or from a Headroom-managed copy
+  extracted from that exact package version.
+- Operational OpenCode config must never contain repo-local file paths, npm
+  `file:` dependencies, or package-manager state in the OpenCode config
+  directory.
+- Development testing of the native plugin must use an isolated OpenCode config
+  root (via `OPENCODE_CONFIG` or `OPENCODE_HOME`) — never the user's operational
+  `~/.config/opencode`.
+
+### How future installers should find or produce the artifact
+
+Installers that want to enable the native plugin must:
+
+1. **Resolve** an explicit semver version of `headroom-opencode` from the npm registry
+   (e.g. `npm pack headroom-opencode@<version>` or equivalent). Installers must
+   not use an unpinned `latest` package and must fail closed if the requested
+   version is unavailable.
+2. **Extract** the built plugin entry from the package:
+   `dist/entry.opencode.js`.
+3. **Place** it in a Headroom-managed artifact/cache/install directory — never
+   inside `~/.config/opencode` and never via npm `file:` dependency.
+4. **Reference** it in OpenCode config by its installed absolute path, or by
+   package name when OpenCode supports package-name plugin resolution from a
+   controlled location.
+
+Example resolution for a hypothetical installer:
+
+```bash
+# Resolve and unpack the published package into a managed cache
+npm pack headroom-opencode@0.1.0 --pack-destination /tmp/headroom-cache
+tar -xzf /tmp/headroom-cache/headroom-opencode-*.tgz \
+  -C /opt/headroom/opencode-plugin/
+# The artifact is now at /opt/headroom/opencode-plugin/package/dist/entry.opencode.js
+```
+
+The installer must **not** create `package.json`, `package-lock.json`, or
+`node_modules/` under the OpenCode config directory. The plugin artifact is a
+pre-built JavaScript file, not an npm project.
+
 ## Programmatic Config Helpers
 
 The package also exports helpers for custom integrations:

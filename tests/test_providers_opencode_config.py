@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -11,7 +13,8 @@ from headroom.providers.opencode.config import (
     HEADROOM_OPENCODE_PLUGIN,
     _inject_key_into_json,
     _parse_json_loose,
-    append_headroom_plugin,
+    headroom_provider_entry,
+    headroom_url_authority,
     inject_opencode_provider_config,
     opencode_config_paths,
     snapshot_opencode_config_if_unwrapped,
@@ -25,6 +28,12 @@ def _set_test_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("USERPROFILE", home)
     monkeypatch.delenv("OPENCODE_HOME", raising=False)
     monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+
+
+# Canonical loopback host used by most on-disk config tests. The injector
+# takes a pre-resolved client host (no env reads), so the tests must pass it
+# explicitly rather than relying on a default.
+_LOOPBACK_HOST = "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +145,7 @@ def test_parse_json_loose_returns_empty_on_invalid() -> None:
 
 def test_inject_key_merges_dicts() -> None:
     """_inject_key_into_json merges nested dicts."""
-    data = {"provider": {"openai": {}}}
+    data: dict[str, Any] = {"provider": {"openai": {}}}
     data = _inject_key_into_json(data, "provider", {"headroom": {}})
     assert "openai" in data["provider"]
     assert "headroom" in data["provider"]
@@ -150,6 +159,42 @@ def test_inject_key_overwrites_non_dict() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pure formatters: headroom_url_authority, headroom_provider_entry
+# ---------------------------------------------------------------------------
+
+
+def test_headroom_url_authority_brackets_ipv6_literal() -> None:
+    """headroom_url_authority brackets raw IPv6 literals in URL authority."""
+    assert headroom_url_authority("::1") == "[::1]"
+    assert headroom_url_authority("fe80::1") == "[fe80::1]"
+
+
+def test_headroom_url_authority_passes_through_ipv4_and_dns() -> None:
+    """headroom_url_authority leaves IPv4 and DNS names untouched."""
+    assert headroom_url_authority("127.0.0.1") == "127.0.0.1"
+    assert headroom_url_authority("192.0.2.10") == "192.0.2.10"
+    assert headroom_url_authority("proxy.internal") == "proxy.internal"
+
+
+def test_headroom_url_authority_idempotent_on_already_bracketed() -> None:
+    """headroom_url_authority does not double-bracket an already bracketed host."""
+    assert headroom_url_authority("[::1]") == "[::1]"
+
+
+def test_headroom_provider_entry_uses_canonical_host() -> None:
+    """headroom_provider_entry uses the supplied canonical host verbatim."""
+    entry = headroom_provider_entry(8787, host="127.0.0.1")
+    assert entry["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+    assert entry["npm"] == "@ai-sdk/openai-compatible"
+
+
+def test_headroom_provider_entry_brackets_ipv6() -> None:
+    """headroom_provider_entry brackets IPv6 hosts in the baseURL."""
+    entry = headroom_provider_entry(8787, host="::1")
+    assert entry["options"]["baseURL"] == "http://[::1]:8787/v1"
+
+
+# ---------------------------------------------------------------------------
 # Inject provider config
 # ---------------------------------------------------------------------------
 
@@ -159,7 +204,7 @@ def test_inject_provider_config_creates_file(
 ) -> None:
     """inject_opencode_provider_config creates the config file when missing."""
     _set_test_home(monkeypatch, tmp_path)
-    inject_opencode_provider_config(port=8787)
+    inject_opencode_provider_config(port=8787, host=_LOOPBACK_HOST)
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     assert config_file.exists()
     config = _parse_json_loose(config_file.read_text())
@@ -175,8 +220,8 @@ def test_inject_provider_config_creates_file(
 def test_inject_provider_config_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """inject_opencode_provider_config is safe to call multiple times."""
     _set_test_home(monkeypatch, tmp_path)
-    inject_opencode_provider_config(port=8787)
-    inject_opencode_provider_config(port=9999)
+    inject_opencode_provider_config(port=8787, host=_LOOPBACK_HOST)
+    inject_opencode_provider_config(port=9999, host=_LOOPBACK_HOST)
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config = _parse_json_loose(config_file.read_text())
     assert config["provider"]["headroom"]["options"]["baseURL"] == "http://127.0.0.1:9999/v1"
@@ -309,7 +354,7 @@ def test_inject_provider_config_preserves_existing_mcp(
         '{"mcp": {"existing-server": {"type": "remote", "url": "https://example.com"}}}'
     )
 
-    inject_opencode_provider_config(port=8787)
+    inject_opencode_provider_config(port=8787, host=_LOOPBACK_HOST)
 
     config = json.loads(config_file.read_text())
     assert "existing-server" in config["mcp"]
@@ -333,8 +378,8 @@ def test_inject_provider_config_idempotent_with_complex_config(
         )
     )
 
-    inject_opencode_provider_config(port=8787)
-    inject_opencode_provider_config(port=8787)
+    inject_opencode_provider_config(port=8787, host=_LOOPBACK_HOST)
+    inject_opencode_provider_config(port=8787, host=_LOOPBACK_HOST)
 
     config = json.loads(config_file.read_text())
     assert "openai" in config["provider"]
@@ -360,30 +405,12 @@ def test_inject_provider_config_preserves_unrelated_top_level_keys(
         )
     )
 
-    inject_opencode_provider_config(port=8787)
+    inject_opencode_provider_config(port=8787, host=_LOOPBACK_HOST)
 
     config = json.loads(config_file.read_text())
     assert config["plugin"] == ["some-plugin"]
     assert config["permission"] == {"bash": {"*": "ask"}}
     assert "headroom" in config.get("provider", {})
-
-
-def test_append_headroom_plugin_adds_plugin_once() -> None:
-    config: dict[str, object] = {"plugin": ["some-plugin"]}
-
-    assert append_headroom_plugin(config) is True
-    assert append_headroom_plugin(config) is False
-
-    assert config["plugin"] == ["some-plugin", HEADROOM_OPENCODE_PLUGIN]
-
-
-def test_append_headroom_plugin_preserves_configured_tuple_entry() -> None:
-    config: dict[str, object] = {
-        "plugin": [[HEADROOM_OPENCODE_PLUGIN, {"proxyUrl": "http://127.0.0.1:8787"}]]
-    }
-
-    assert append_headroom_plugin(config) is False
-    assert config["plugin"] == [[HEADROOM_OPENCODE_PLUGIN, {"proxyUrl": "http://127.0.0.1:8787"}]]
 
 
 def test_inject_provider_config_no_crash_on_unwriteable_dir(
@@ -395,7 +422,7 @@ def test_inject_provider_config_no_crash_on_unwriteable_dir(
 
     monkeypatch.setenv("HOME", "/nonexistent/path/that/cannot/be/created")
     try:
-        inject_opencode_provider_config(port=8787)
+        inject_opencode_provider_config(port=8787, host=_LOOPBACK_HOST)
     except click_mod.ClickException:
         pass
     except OSError:
@@ -403,8 +430,80 @@ def test_inject_provider_config_no_crash_on_unwriteable_dir(
 
 
 # ---------------------------------------------------------------------------
-# Runtime module coverage: build_opencode_config_content, build_launch_env
+# Runtime module coverage: headroom_client_host, proxy_base_url,
+# build_opencode_config_content, build_launch_env
 # ---------------------------------------------------------------------------
+
+
+def test_headroom_client_host_defaults_to_ipv4_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """headroom_client_host returns 127.0.0.1 when HEADROOM_HOST is unset/empty."""
+    from headroom.providers.opencode.runtime import headroom_client_host
+
+    monkeypatch.delenv("HEADROOM_HOST", raising=False)
+    assert headroom_client_host() == "127.0.0.1"
+    monkeypatch.setenv("HEADROOM_HOST", "")
+    assert headroom_client_host() == "127.0.0.1"
+    monkeypatch.setenv("HEADROOM_HOST", "   ")
+    assert headroom_client_host() == "127.0.0.1"
+
+
+def test_headroom_client_host_rewrites_ipv4_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """headroom_client_host rewrites IPv4 unspecified (0.0.0.0) to 127.0.0.1."""
+    from headroom.providers.opencode.runtime import headroom_client_host
+
+    monkeypatch.setenv("HEADROOM_HOST", "0.0.0.0")
+    assert headroom_client_host() == "127.0.0.1"
+
+
+def test_headroom_client_host_rewrites_ipv6_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """headroom_client_host rewrites IPv6 unspecified (::) to ::1."""
+    from headroom.providers.opencode.runtime import headroom_client_host
+
+    monkeypatch.setenv("HEADROOM_HOST", "::")
+    assert headroom_client_host() == "::1"
+    monkeypatch.setenv("HEADROOM_HOST", "[::]")
+    assert headroom_client_host() == "::1"
+
+
+def test_headroom_client_host_unbrackets_already_bracketed_ipv6(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """headroom_client_host strips brackets from bracketed IPv6 inputs."""
+    from headroom.providers.opencode.runtime import headroom_client_host
+
+    monkeypatch.setenv("HEADROOM_HOST", "[::1]")
+    assert headroom_client_host() == "::1"
+
+
+def test_headroom_client_host_passes_through_literal_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """headroom_client_host returns non-wildcard IPs and DNS names unchanged."""
+    from headroom.providers.opencode.runtime import headroom_client_host
+
+    monkeypatch.setenv("HEADROOM_HOST", "192.0.2.10")
+    assert headroom_client_host() == "192.0.2.10"
+    monkeypatch.setenv("HEADROOM_HOST", "fe80::1")
+    assert headroom_client_host() == "fe80::1"
+    monkeypatch.setenv("HEADROOM_HOST", "proxy.internal")
+    assert headroom_client_host() == "proxy.internal"
+
+
+def test_headroom_client_host_reads_supplied_env() -> None:
+    """headroom_client_host uses the supplied env instead of os.environ."""
+    from headroom.providers.opencode.runtime import headroom_client_host
+
+    env = {"HEADROOM_HOST": "10.0.0.5"}
+    assert headroom_client_host(env=env) == "10.0.0.5"
+
+
+def test_proxy_base_url_uses_canonical_host() -> None:
+    """proxy_base_url is a pure formatter: it does not read env or rewrite hosts."""
+    from headroom.providers.opencode.runtime import proxy_base_url
+
+    assert proxy_base_url(9000, host="127.0.0.1") == "http://127.0.0.1:9000/v1"
+    assert proxy_base_url(9000, host="192.0.2.10") == "http://192.0.2.10:9000/v1"
+    assert proxy_base_url(9000, host="::1") == "http://[::1]:9000/v1"
 
 
 def test_build_opencode_config_content_without_mcp(
@@ -416,11 +515,11 @@ def test_build_opencode_config_content_without_mcp(
     plugin.write_text("export default () => {}", encoding="utf-8")
     monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_PATH", str(plugin))
 
-    config = build_opencode_config_content(port=8787, include_mcp=False)
+    config = build_opencode_config_content(port=8787, host="127.0.0.1", include_mcp=False)
     assert "mcp" not in config
     assert "model" not in config
     # Native providers are pointed at the proxy so traffic routes through Headroom.
-    providers = config["provider"]
+    providers = cast(dict[str, Any], config["provider"])
     assert providers["anthropic"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
     assert providers["openai"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
     # The headroom provider exposes explicit models so "headroom/<id>" resolves (#1657).
@@ -440,16 +539,29 @@ def test_build_opencode_config_content_skips_plugin_when_unbuilt(
     # An override pointing at a missing file resolves to None → no plugin entry,
     # but native-provider routing still applies (the pip-only fallback).
     monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_PATH", str(tmp_path / "missing.js"))
-    config = build_opencode_config_content(port=8787)
+    config = build_opencode_config_content(port=8787, host="127.0.0.1")
     assert "plugin" not in config
-    assert config["provider"]["anthropic"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+    providers = cast(dict[str, Any], config["provider"])
+    assert providers["anthropic"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+
+
+def test_build_opencode_config_content_brackets_ipv6() -> None:
+    """build_opencode_config_content uses the supplied canonical host verbatim."""
+    from headroom.providers.opencode.runtime import build_opencode_config_content
+
+    config = build_opencode_config_content(port=8787, host="::1", include_mcp=False)
+    providers = cast(dict[str, Any], config["provider"])
+    assert providers["anthropic"]["options"]["baseURL"] == "http://[::1]:8787/v1"
+    assert providers["openai"]["options"]["baseURL"] == "http://[::1]:8787/v1"
+    assert providers["headroom"]["options"]["baseURL"] == "http://[::1]:8787/v1"
 
 
 def test_build_opencode_config_content_with_mcp_uses_local_stdio() -> None:
     from headroom.providers.opencode.runtime import build_opencode_config_content
 
-    config = build_opencode_config_content(port=9000, include_mcp=True)
-    assert config["mcp"]["headroom"] == {
+    config = build_opencode_config_content(port=9000, host="127.0.0.1", include_mcp=True)
+    mcp = cast(dict[str, Any], config["mcp"])
+    assert mcp["headroom"] == {
         "type": "local",
         "command": ["headroom", "mcp", "serve"],
         "enabled": True,
@@ -486,6 +598,7 @@ def test_build_launch_env_with_custom_environ() -> None:
 
     custom = {
         "EXISTING_VAR": "keep-me",
+        "HEADROOM_HOST": "192.0.2.10",
         "OPENAI_BASE_URL": "https://deepseek.example/v1",
         "ANTHROPIC_BASE_URL": "https://anthropic.example",
     }
@@ -495,14 +608,55 @@ def test_build_launch_env_with_custom_environ() -> None:
         include_mcp=False,
     )
     assert env["EXISTING_VAR"] == "keep-me"
+    assert "http://192.0.2.10:8787/v1" in env["OPENCODE_CONFIG_CONTENT"]
+    assert "plugin" not in env["OPENCODE_CONFIG_CONTENT"]
     assert env["OPENAI_BASE_URL"] == "https://deepseek.example/v1"
     assert env["ANTHROPIC_BASE_URL"] == "https://anthropic.example"
 
 
-def test_proxy_base_url() -> None:
-    from headroom.providers.opencode.runtime import proxy_base_url
+def test_build_launch_env_plugin_path_uses_supplied_environ(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from headroom.providers.opencode.runtime import build_launch_env
 
-    assert proxy_base_url(9000) == "http://127.0.0.1:9000/v1"
+    ambient_plugin = tmp_path / "ambient.entry.opencode.js"
+    ambient_plugin.write_text("export default () => {}", encoding="utf-8")
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_PATH", str(ambient_plugin))
+
+    env, display = build_launch_env(
+        port=8787,
+        environ={"HEADROOM_HOST": "127.0.0.1"},
+        include_mcp=False,
+    )
+
+    assert str(ambient_plugin) not in env["OPENCODE_CONFIG_CONTENT"]
+    assert "plugin" not in env["OPENCODE_CONFIG_CONTENT"]
+    assert "HEADROOM_PROXY_URL" not in env
+    assert f"plugin={HEADROOM_OPENCODE_PLUGIN}" not in display
+
+
+def test_build_launch_env_rewrites_bind_wildcard_for_client() -> None:
+    """build_launch_env resolves HEADROOM_HOST=0.0.0.0 to a loopback URL."""
+    from headroom.providers.opencode.runtime import build_launch_env
+
+    custom = {"HEADROOM_HOST": "0.0.0.0"}
+    env, _display = build_launch_env(port=8787, environ=custom, include_mcp=False)
+    assert "http://127.0.0.1:8787/v1" in env["OPENCODE_CONFIG_CONTENT"]
+
+
+def test_build_launch_env_uses_pre_resolved_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    from headroom.providers.opencode.runtime import build_launch_env
+
+    monkeypatch.setenv("HEADROOM_HOST", "192.0.2.10")
+    env, _display = build_launch_env(
+        port=8787,
+        environ=os.environ,
+        host="127.0.0.1",
+        include_mcp=False,
+        include_plugin=False,
+    )
+    assert "http://127.0.0.1:8787/v1" in env["OPENCODE_CONFIG_CONTENT"]
+    assert "http://192.0.2.10:8787/v1" not in env["OPENCODE_CONFIG_CONTENT"]
 
 
 def test_inject_provider_config_strips_existing_markers(
@@ -512,11 +666,58 @@ def test_inject_provider_config_strips_existing_markers(
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
 
-    inject_opencode_provider_config(port=9000)
+    inject_opencode_provider_config(port=9000, host=_LOOPBACK_HOST)
     first = config_file.read_text()
     assert "headroom" in first
 
-    inject_opencode_provider_config(port=9001)
+    inject_opencode_provider_config(port=9001, host=_LOOPBACK_HOST)
     second = config_file.read_text()
     assert "headroom" in second
     assert second.count("headroom") == first.count("headroom")
+
+
+# ---------------------------------------------------------------------------
+# Plugin artifact contract (issue #14)
+# ---------------------------------------------------------------------------
+
+
+def test_headroom_opencode_plugin_constant_is_published_package_name() -> None:
+    """``HEADROOM_OPENCODE_PLUGIN`` is ``"headroom-opencode"`` — the published
+    npm package name, not a local path or checkout reference. Operational
+    OpenCode installs must resolve the plugin from this published artifact.
+    """
+    assert HEADROOM_OPENCODE_PLUGIN == "headroom-opencode"
+
+
+def test_build_opencode_config_content_does_not_autoload_development_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Generated runtime config must not discover a repo-local plugin build.
+
+    Provider ``baseURL`` routing is the default operational integration; the
+    native plugin is optional and requires an explicitly configured stable
+    artifact. The check is that with no plugin override and no fallback
+    file probing, ``build_opencode_config_content`` returns a provider-only
+    config (no ``plugin`` key).
+    """
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+    # The repo-local probe must be inert: even if a checked-in plugin
+    # artifact were present somewhere on disk, runtime would not discover
+    # it without HEADROOM_OPENCODE_PLUGIN_PATH pointing at it.
+    fake_plugin = tmp_path / "plugins" / "opencode" / "dist" / "entry.opencode.js"
+    fake_plugin.parent.mkdir(parents=True)
+    fake_plugin.write_text("export default () => {}", encoding="utf-8")
+
+    from headroom.providers.opencode.runtime import build_opencode_config_content
+
+    config = build_opencode_config_content(port=8787, host="127.0.0.1", include_plugin=True)
+    # Provider routing is present and functional.
+    assert "provider" in config
+    providers = cast(dict[str, Any], config["provider"])
+    assert providers["anthropic"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+    assert providers["openai"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+    # Plugin entry is absent — provider-only fallback.
+    assert "plugin" not in config, (
+        "Default config must omit 'plugin' rather than injecting a dangling or repo-local path."
+    )

@@ -14,7 +14,7 @@ from headroom.providers.opencode.install import (
 )
 
 
-def _manifest(port: int = 8787) -> DeploymentManifest:
+def _manifest(port: int = 8787, host: str = "127.0.0.1") -> DeploymentManifest:
     return DeploymentManifest(
         profile="test",
         preset="persistent-task",
@@ -24,7 +24,7 @@ def _manifest(port: int = 8787) -> DeploymentManifest:
         provider_mode="auto",
         targets=[],
         port=port,
-        host="127.0.0.1",
+        host=host,
         backend="anthropic",
         proxy_args=[],
         base_env={},
@@ -60,7 +60,28 @@ def test_apply_provider_scope_creates_config(
 
     config = json.loads(config_file.read_text())
     assert config["provider"]["headroom"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+    assert "models" in config["provider"]["headroom"]
     assert "mcp" not in config
+
+
+def test_apply_provider_scope_uses_manifest_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope uses the manifest's client-reachable host."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+
+    manifest = _manifest(port=8787, host="::1")
+    apply_provider_scope(manifest)
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    import json
+
+    config = json.loads(config_file.read_text())
+    assert config["provider"]["headroom"]["options"]["baseURL"] == "http://[::1]:8787/v1"
 
 
 def test_apply_provider_scope_skips_when_scope_is_not_provider(
