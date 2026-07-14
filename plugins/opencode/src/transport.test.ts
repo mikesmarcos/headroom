@@ -20,6 +20,12 @@ type SeenRequest = {
   body: string;
 };
 
+function configuredProxyUrl(pathPrefix: string = ""): string {
+  const host = process.env.HEADROOM_HOST || "127.0.0.1";
+  const port = process.env.HEADROOM_PORT || "8787";
+  return `http://${host}:${port}${pathPrefix}`;
+}
+
 function proxyServer(pathPrefix: string = "/v1"): Promise<{
   url: string;
   seen: SeenRequest[];
@@ -98,6 +104,30 @@ describe("Headroom OpenCode transport", () => {
       expect(fetchMock.mock.calls[0][0]).toEqual(new URL(`${proxyOrigin}/v1/responses`));
       const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
       expect(headers.get("x-headroom-base-url")).toBe("https://open.bigmodel.cn");
+      expect(headers.get("x-headroom-original-path")).toBe(upstreamPath);
+
+      globalThis.fetch = originalFetch;
+      uninstallHeadroomTransport();
+    }
+  });
+
+  it("routes fetch Anthropic messages paths through /v1/messages with proxy base and normalized-path header", async () => {
+    const proxyTargets = [configuredProxyUrl(), configuredProxyUrl("/v1")];
+    const upstreamPath = "/zen/go/v1/messages";
+    for (const proxyUrl of proxyTargets) {
+      const proxyOrigin = new URL(proxyUrl).origin;
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn(async (..._args: FetchCall) => new Response("ok"));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      installHeadroomTransport({ proxyUrl });
+
+      await fetch(`https://opencode.ai${upstreamPath}`, { method: "POST", headers: { "content-type": "application/json" } });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][0]).toEqual(new URL(`${proxyOrigin}/v1/messages`));
+      const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
+      expect(headers.get("x-headroom-base-url")).toBe("https://opencode.ai");
       expect(headers.get("x-headroom-original-path")).toBe(upstreamPath);
 
       globalThis.fetch = originalFetch;

@@ -179,7 +179,11 @@ function routedUrl(upstream: URL, proxy: URL): URL {
   return new URL(`${upstream.pathname}${upstream.search}`, proxy.origin);
 }
 
-function normalizedOpenAiProxyPath(pathname: string): string | undefined {
+function normalizedOpenAiProxyPath(upstream: URL): string | undefined {
+  const { hostname, pathname } = upstream;
+  if (hostname === "opencode.ai" && pathname.endsWith("/messages")) {
+    return "/v1/messages";
+  }
   if (pathname.endsWith("/chat/completions")) {
     return "/v1/chat/completions";
   }
@@ -190,7 +194,7 @@ function normalizedOpenAiProxyPath(pathname: string): string | undefined {
 }
 
 function routedUrlForOpenCode(upstream: URL, proxy: URL): { url: URL; originalPath: string | undefined } {
-  const normalizedPath = normalizedOpenAiProxyPath(upstream.pathname);
+  const normalizedPath = normalizedOpenAiProxyPath(upstream);
   if (!normalizedPath) {
     return {
       url: routedUrl(upstream, proxy),

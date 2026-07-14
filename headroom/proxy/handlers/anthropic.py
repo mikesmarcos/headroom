@@ -14,6 +14,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from headroom.proxy.stage_timer import StageTimer, emit_stage_timings_log
 
@@ -36,6 +37,64 @@ from headroom.proxy.memory_query import MemoryQuery
 from headroom.proxy.outcome import RequestOutcome
 
 logger = logging.getLogger("headroom.proxy")
+
+_ANTHROPIC_BASE_URL_HEADER = "x-headroom-base-url"
+_ANTHROPIC_ORIGINAL_PATH_HEADER = "x-headroom-original-path"
+
+
+def _header_get(headers: dict[str, str], name: str) -> str | None:
+    lowered = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lowered:
+            return value
+    return None
+
+
+def _normalize_http_origin(origin: str) -> str | None:
+    parsed = urlparse(origin.strip())
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return None
+    hostname = parsed.hostname.lower()
+    port = parsed.port
+    default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    port_part = "" if port is None or default_port else f":{port}"
+    return f"{scheme}://{hostname}{port_part}"
+
+
+def _resolve_anthropic_transport_base(request_headers: dict[str, str]) -> str | None:
+    raw_base_url = _header_get(request_headers, _ANTHROPIC_BASE_URL_HEADER)
+    if raw_base_url is None:
+        return None
+    return _normalize_http_origin(raw_base_url)
+
+
+def _resolve_anthropic_transport_path(request_headers: dict[str, str], *, default_path: str) -> str:
+    raw_path = _header_get(request_headers, _ANTHROPIC_ORIGINAL_PATH_HEADER)
+    upstream_path = raw_path.strip() if raw_path is not None else None
+    if upstream_path is None:
+        return default_path
+    if not upstream_path.startswith("/") or upstream_path.startswith("//"):
+        return default_path
+    parsed = urlparse(upstream_path)
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return default_path
+    if not parsed.path.endswith("/messages"):
+        return default_path
+    return parsed.path
+
+
+def _anthropic_outcome_provider(
+    request_headers: dict[str, str], client: str | None, provider_name: str
+) -> str:
+    if client == "opencode" and (
+        _header_get(request_headers, _ANTHROPIC_BASE_URL_HEADER)
+        or _header_get(request_headers, _ANTHROPIC_ORIGINAL_PATH_HEADER)
+    ):
+        return "opencode"
+    return provider_name
 
 
 def _strip_streaming_only_content_fields(messages: Any) -> None:
@@ -546,6 +605,12 @@ class AnthropicHandlerMixin:
         start_time = time.time()
         request_id = await self._next_request_id()
         trace_session_id = uuid.uuid4().hex
+        request_headers = dict(request.headers.items())
+        upstream_base_url = upstream_base_url or _resolve_anthropic_transport_base(request_headers)
+        upstream_path = _resolve_anthropic_transport_path(
+            request_headers,
+            default_path=request.url.path if upstream_base_url else "/v1/messages",
+        )
 
         # Phase F PR-F1: classify auth mode at request entry. The result
         # is stored on `request.state` so downstream handlers (cache
@@ -718,7 +783,7 @@ class AnthropicHandlerMixin:
             # keeps it cache-safe: overlay_cached_prefix replays the same stripped bytes.
             _strip_streaming_only_content_fields(messages)
             pipeline_provider = provider_name
-            pipeline_path = request.url.path if upstream_base_url else "/v1/messages"
+            pipeline_path = upstream_path if upstream_base_url else "/v1/messages"
             pipeline_stream = bool(body.get("stream", False) or force_stream)
             with stage_timer.measure("deep_copy"):
                 original_client_messages = copy.deepcopy(messages)
@@ -792,6 +857,7 @@ class AnthropicHandlerMixin:
             # from User-Agent or X-Client. Surfaced via the funnel into
             # PERF logs and RequestLog.tags — see RequestOutcome.client.
             client = classify_client(headers, default="claude")
+            outcome_provider = _anthropic_outcome_provider(request_headers, client, provider_name)
             # PR-A5 (P5-49): strip internal x-headroom-* from upstream-bound
             # headers AFTER `_extract_tags` reads them. Inbound bypass gating
             # uses `request.headers.get(...)` directly above; memory user-id
@@ -957,7 +1023,7 @@ class AnthropicHandlerMixin:
                     await self._record_request_outcome(
                         RequestOutcome(
                             request_id=request_id,
-                            provider=provider_name,
+                            provider=outcome_provider,
                             model=model,
                             original_tokens=0,
                             optimized_tokens=0,
@@ -2515,7 +2581,7 @@ class AnthropicHandlerMixin:
             # Direct Anthropic API, or a provider-compatible Anthropic
             # Messages endpoint such as Vertex AI publisher rawPredict.
             url = (
-                build_copilot_upstream_url(upstream_base_url, request.url.path)
+                build_copilot_upstream_url(upstream_base_url, upstream_path)
                 if upstream_base_url
                 else f"{self.ANTHROPIC_API_URL}/v1/messages"
             )
@@ -2593,7 +2659,7 @@ class AnthropicHandlerMixin:
                         body_mutated=body_mutation_tracker.mutated,
                         mutation_reasons=body_mutation_tracker.reasons,
                         memory_request_ctx=memory_request_ctx,
-                        outcome_provider=provider_name,
+                        outcome_provider=outcome_provider,
                         session_key=session_key,
                     )
                 else:
@@ -3110,7 +3176,7 @@ class AnthropicHandlerMixin:
                     await self._record_request_outcome(
                         RequestOutcome(
                             request_id=request_id,
-                            provider=provider_name,
+                            provider=outcome_provider,
                             model=model,
                             status_code=response.status_code,
                             original_tokens=original_tokens,

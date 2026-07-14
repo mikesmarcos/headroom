@@ -203,6 +203,22 @@ def _resolve_openai_chat_handler_path(base_url: str, model: str | None) -> str:
     return _OPENAI_CHAT_COMPLETIONS_PATH
 
 
+def _openai_outcome_provider(request_headers: dict[str, str], client: str | None) -> str:
+    """Provider label for OpenAI-compatible transport requests.
+
+    OpenCode's native/opencode-go transport reaches Headroom through the
+    OpenAI-compatible handlers and supplies x-headroom routing headers for the
+    real upstream. Attribute those rows to opencode so dashboard provider
+    breakdowns do not collapse native OpenCode traffic into OpenAI.
+    """
+    if client == "opencode" and (
+        _header_get(request_headers, _OPENAI_BASE_URL_HEADER)
+        or _header_get(request_headers, _OPENAI_ORIGINAL_PATH_HEADER)
+    ):
+        return "opencode"
+    return "openai"
+
+
 def _append_request_query(url: str, query: str) -> str:
     if not query:
         return url
@@ -2310,6 +2326,7 @@ class OpenAIHandlerMixin:
         headers.pop("accept-encoding", None)
         tags = extract_tags(headers)
         client = classify_client(headers)
+        outcome_provider = _openai_outcome_provider(request.headers, client)
         # Surface the image-compression decision (computed earlier) into
         # tags now that the tags dict exists. Same observability pattern
         # the funnel uses for passthrough_reason + memory_skip_reason.
@@ -2342,7 +2359,7 @@ class OpenAIHandlerMixin:
             handler_path,
             upstream_base_url or "",
         )
-        openai_chat_outcome_provider = custom_chat_provider or "openai"
+        openai_chat_outcome_provider = custom_chat_provider or outcome_provider
 
         # Memory: Get user ID when memory is enabled. Reads `request.headers`
         # directly because `headers` was stripped of `x-headroom-*` for the
@@ -3530,13 +3547,14 @@ class OpenAIHandlerMixin:
 
                 # OpenAI has no write penalty — uncached = total - cached
                 uncached_input_tokens = max(0, total_input_tokens - cache_read_tokens)
+                effective_tokens_saved = max(tokens_saved, original_tokens - total_input_tokens, 0)
 
                 # (record_tokens clamps negative savings to 0 universally — the
                 # forwarded request is never larger than the original.)
                 if self.cost_tracker:
                     self.cost_tracker.record_tokens(
                         model,
-                        tokens_saved,
+                        effective_tokens_saved,
                         optimized_tokens,
                         cache_read_tokens=cache_read_tokens,
                         cache_write_tokens=cache_write_tokens,
@@ -3628,8 +3646,8 @@ class OpenAIHandlerMixin:
                         original_tokens=original_tokens,
                         optimized_tokens=total_input_tokens,
                         output_tokens=output_tokens,
-                        tokens_saved=tokens_saved,
-                        attempted_input_tokens=total_input_tokens + tokens_saved,
+                        tokens_saved=effective_tokens_saved,
+                        attempted_input_tokens=total_input_tokens + effective_tokens_saved,
                         cache_read_tokens=cache_read_tokens,
                         cache_write_tokens=cache_write_tokens,
                         uncached_input_tokens=uncached_input_tokens,
@@ -3648,10 +3666,10 @@ class OpenAIHandlerMixin:
                     )
                 )
 
-                if tokens_saved > 0:
+                if effective_tokens_saved > 0:
                     logger.info(
                         f"[{request_id}] {model}: {original_tokens:,} → {optimized_tokens:,} "
-                        f"(saved {tokens_saved:,} tokens)"
+                        f"(saved {effective_tokens_saved:,} tokens)"
                     )
 
                 # Remove compression headers since httpx already decompressed the response
@@ -3818,6 +3836,7 @@ class OpenAIHandlerMixin:
         headers.pop("content-encoding", None)
         tags = extract_tags(headers)
         client = classify_client(headers)
+        outcome_provider = _openai_outcome_provider(request.headers, client)
         # PR-A5 (P5-49): strip internal x-headroom-* from upstream-bound
         # headers AFTER `_extract_tags` reads them. Memory user-id reads
         # `request.headers` below.
@@ -4114,6 +4133,7 @@ class OpenAIHandlerMixin:
         headers, is_chatgpt_auth = _resolve_codex_routing_headers(headers)
         if is_chatgpt_auth:
             client = "codex"
+            outcome_provider = "openai"
 
         # Route to correct endpoint based on auth mode.
         # ChatGPT session auth (codex login) uses chatgpt.com, not api.openai.com.
@@ -4340,6 +4360,7 @@ class OpenAIHandlerMixin:
                     body_mutated=body_mutation_tracker.mutated,
                     mutation_reasons=body_mutation_tracker.reasons,
                     waste_signals=waste_signals_dict,
+                    outcome_provider=outcome_provider,
                 )
             else:
                 headers = await apply_copilot_api_auth(headers, url=url)
@@ -4626,7 +4647,7 @@ class OpenAIHandlerMixin:
                 await self._record_request_outcome(
                     RequestOutcome(
                         request_id=request_id,
-                        provider="openai",
+                        provider=outcome_provider,
                         model=model,
                         status_code=response.status_code,
                         original_tokens=effective_original_tokens,

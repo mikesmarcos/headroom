@@ -126,7 +126,21 @@ def build_manifest(
     image: str,
     no_http2: bool = False,
 ) -> DeploymentManifest:
-    """Create a normalized deployment manifest."""
+    """Create a normalized deployment manifest.
+
+    The persistent-install presets (service / task / Docker) are intentionally
+    loopback-only: the planner binds the proxy to ``127.0.0.1`` and emits
+    ``127.0.0.1`` as the manifest's client-reachable host, regardless of the
+    caller's ``HEADROOM_HOST``. This is asymmetric with wrap-time, where
+    :func:`headroom.providers.opencode.runtime.headroom_client_host` honors
+    ``HEADROOM_HOST`` so wrapped tools on remote hosts can still reach the
+    proxy. Persistent installs are scoped to a single host (the supervisor
+    process manages the proxy lifecycle on the same machine), so honoring
+    ``HEADROOM_HOST`` here would risk generating a baseURL no local tool
+    could reach. If a future preset needs a non-loopback host, the planner
+    should call :func:`headroom.providers.opencode.runtime.headroom_client_host`
+    rather than reintroduce the wildcard inline.
+    """
 
     normalized_profile = validate_profile_name(profile)
 
@@ -137,11 +151,14 @@ def build_manifest(
     else:
         supervisor_kind = SupervisorKind.NONE.value
 
+    # Persistent installs are loopback-only: see the docstring above.
+    persistent_host = "127.0.0.1"
+
     resolved_targets = resolve_targets(provider_mode, targets, scope=scope)
     tool_envs = build_tool_envs(port, backend, resolved_targets)
     base_env = {
         "HEADROOM_PORT": str(port),
-        "HEADROOM_HOST": "127.0.0.1",
+        "HEADROOM_HOST": persistent_host,
         "HEADROOM_MODE": proxy_mode,
         "HEADROOM_BACKEND": backend,
     }
@@ -157,7 +174,7 @@ def build_manifest(
 
     proxy_args = [
         "--host",
-        "127.0.0.1",
+        persistent_host,
         "--port",
         str(port),
         "--mode",
@@ -185,7 +202,7 @@ def build_manifest(
         provider_mode=provider_mode,
         targets=resolved_targets,
         port=port,
-        host="127.0.0.1",
+        host=persistent_host,
         backend=backend,
         anyllm_provider=anyllm_provider,
         region=region,
@@ -196,7 +213,7 @@ def build_manifest(
         image=image,
         service_name=f"headroom-{normalized_profile}",
         container_name=container_name,
-        health_url=f"http://127.0.0.1:{port}/readyz",
+        health_url=f"http://{persistent_host}:{port}/readyz",
         base_env=base_env,
         tool_envs=tool_envs,
         proxy_args=proxy_args,

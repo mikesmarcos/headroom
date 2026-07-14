@@ -278,6 +278,8 @@ class RequestOutcome:
             log_request_messages = request_items
             log_compressed_messages = None
 
+        effective_tokens_saved = max(tokens_saved, original_tokens - optimized_tokens, 0)
+
         return cls(
             request_id=request_id,
             provider=provider,
@@ -285,8 +287,8 @@ class RequestOutcome:
             original_tokens=original_tokens,
             optimized_tokens=optimized_tokens,
             output_tokens=output_tokens,
-            tokens_saved=tokens_saved,
-            attempted_input_tokens=optimized_tokens + tokens_saved,
+            tokens_saved=effective_tokens_saved,
+            attempted_input_tokens=optimized_tokens + effective_tokens_saved,
             cache_read_tokens=cache_read_tokens,
             cache_write_tokens=cache_write_tokens,
             cache_write_5m_tokens=cache_write_5m_tokens,

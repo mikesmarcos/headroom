@@ -29,12 +29,12 @@ _MEMORY_STORE_GROUP = "headroom.memory_store"
 _MEMORY_VECTOR_GROUP = "headroom.memory_vector"
 _MEMORY_TEXT_GROUP = "headroom.memory_text"
 
-# Process-wide embedder cache keyed by (backend, model). Embedders are
+# Process-wide embedder cache keyed by (backend, model, ollama_base_url). Embedders are
 # stateless with respect to the memory store, so a single instance can
 # safely serve every per-project ``LocalBackend`` created by the
 # BackendRouter. Without this cache, opening N project DBs would load
 # the sentence-transformers / ONNX model N times.
-_EMBEDDER_CACHE: dict[tuple[str, str], Embedder] = {}
+_EMBEDDER_CACHE: dict[tuple[str, str, str], Embedder] = {}
 _EMBEDDER_CACHE_LOCK = threading.Lock()
 
 
@@ -145,7 +145,7 @@ def _create_embedder(config: MemoryConfig) -> Embedder:
     """Create or return a cached embedder backend.
 
     The embedder is shared across every ``LocalBackend`` instance that
-    requests the same ``(embedder_backend, embedder_model)`` pair. This
+    requests the same ``(embedder_backend, embedder_model, ollama_base_url)`` triple. This
     matters for the per-project storage router, which can open many
     backends in the same process and must not pay the
     sentence-transformers / ONNX model-load cost more than once.
@@ -161,10 +161,10 @@ def _create_embedder(config: MemoryConfig) -> Embedder:
     """
 
     # Validate inputs ahead of the cache. The cache key is
-    # ``(backend, model)`` and intentionally does NOT include the API
-    # key — but that means a cached OpenAI embedder would shadow the
-    # config-validation step for a subsequent caller who forgot to pass
-    # ``openai_api_key``. Run the validation up front instead.
+    # ``(backend, model, ollama_base_url)`` and intentionally does NOT
+    # include the API key — but that means a cached OpenAI embedder would
+    # shadow the config-validation step for a subsequent caller who forgot
+    # to pass ``openai_api_key``. Run the validation up front instead.
     if config.embedder_backend == EmbedderBackend.OPENAI and not config.openai_api_key:
         raise ValueError("openai_api_key is required for OpenAI embedder")
 

@@ -11,6 +11,13 @@ OpenCode integration helpers for Headroom. The package supports two integration 
 npm install headroom-opencode
 ```
 
+> **Important:** A versioned `headroom-opencode` package is the selected stable
+> artifact source for the native plugin. Operational OpenCode config must never
+> reference the plugin from a development checkout via npm `file:` dependency or
+> repo-local path — that would couple OpenCode's runtime to the mutable working
+> tree. See the [OpenCode integration docs](/docs/opencode#plugin-artifact-contract)
+> for the full artifact contract.
+
 ## Provider Config Helpers
 
 Use these helpers when you need to generate OpenCode config that routes a `headroom` provider through a running Headroom proxy.

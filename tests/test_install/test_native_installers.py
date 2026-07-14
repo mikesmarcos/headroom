@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -447,348 +448,368 @@ def _powershell_executable() -> str | None:
     return shutil.which("pwsh") or shutil.which("powershell") or shutil.which("powershell.exe")
 
 
-@pytest.mark.skipif(
-    os.name != "nt" or _powershell_executable() is None,
-    reason="Windows PowerShell coverage runs on Windows hosts only",
-)
-def test_powershell_native_installer_supports_persistent_docker_lifecycle(tmp_path: Path) -> None:
-    powershell = _powershell_executable()
-    assert powershell is not None
+def _cmd_executable() -> str | None:
+    """Return the cmd.exe path when present, else None.
 
+    Coverage of the generated ``headroom.cmd`` wrapper requires the Windows
+    command interpreter; on Linux/macOS that wrapper is installed (the install
+    script writes it) but cannot be invoked, so its subcoverage is skipped
+    rather than silently elided by an inline ``if`` branch.
+    """
+    return shutil.which("cmd.exe")
+
+
+def _normalize_powershell_error_text(text: str) -> str:
+    """Normalize PowerShell error text for substring matching.
+
+    PowerShell ``Write-Error`` prefixes its gutter with the record separator
+    rendered as `` | `` (a literal pipe bracketed by spaces). The dotnet
+    formatter also injects ANSI color escapes via the hosting terminal. This
+    helper strips the ANSI escapes, removes the `` | `` PowerShell error
+    gutter, and collapses runs of whitespace, so test assertions can match
+    against the underlying error message rather than the host's formatting.
+    """
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    text = text.replace(" | ", " ")
+    return " ".join(text.split())
+
+
+# PowerShell Common Args reused for invoking the installed .ps1 wrapper.
+_PS_EXEC_ARGS = ("-NoProfile", "-ExecutionPolicy", "Bypass", "-File")
+
+
+def _run_powershell_install(powershell: str, env: dict[str, str]) -> None:
+    """Run the PowerShell native installer and assert the wrappers exist."""
+    _run(
+        [powershell, *_PS_EXEC_ARGS, str(REPO_ROOT / "scripts" / "install.ps1")],
+        env=env,
+        cwd=REPO_ROOT,
+    )
+
+
+def _assert_powershell_wrappers_installed(home: Path) -> tuple[Path, Path]:
+    """Assert both the .ps1 and .cmd wrappers were rendered by install.ps1."""
+    wrapper = home / ".local" / "bin" / "headroom.ps1"
+    assert wrapper.exists()
+    assert "__HEADROOM_INSTALL_IMAGE__" not in wrapper.read_text(encoding="utf-8")
+    assert "headroom:test-image" in wrapper.read_text(encoding="utf-8")
+    cmd_wrapper = home / ".local" / "bin" / "headroom.cmd"
+    assert cmd_wrapper.exists()
+    return wrapper, cmd_wrapper
+
+
+def _run_powershell_help(powershell: str, wrapper: Path, env: dict[str, str]) -> None:
+    """Exercise the .ps1 wrapper's help/--help and assert key surfaces."""
+    help_result = _run(
+        [powershell, *_PS_EXEC_ARGS, str(wrapper), "install", "-?"],
+        env=env,
+    )
+    _run(
+        [powershell, *_PS_EXEC_ARGS, str(wrapper), "proxy", "--help"],
+        env=env,
+    )
+    assert "persistent-docker preset only" in help_result.stdout
+    _run(
+        [powershell, *_PS_EXEC_ARGS, str(wrapper), "--help"],
+        env=env,
+    )
+
+
+def _assert_cmd_wrapper_lifecycle(cmd: str, cmd_wrapper: Path, env: dict[str, str]) -> None:
+    """Exercise the .cmd wrapper surfaces that mirror the .ps1 help/error paths."""
+    cmd_help_result = _run(
+        [cmd, "/c", str(cmd_wrapper), "install", "-?"],
+        env=env,
+    )
+    assert "persistent-docker preset only" in cmd_help_result.stdout
+
+    wrap_help = _run(
+        [cmd, "/c", str(cmd_wrapper), "wrap", "--help"],
+        env=env,
+    )
+    assert "Supported commands:" in wrap_help.stdout
+    assert "copilot" not in wrap_help.stdout
+
+    unsupported_wrap = _run(
+        [cmd, "/c", str(cmd_wrapper), "wrap", "copilot", "--help"],
+        env=env,
+        check=False,
+    )
+    assert unsupported_wrap.returncode != 0
+    assert "does not support 'wrap copilot'" in unsupported_wrap.stderr
+
+    invalid_profile = _run(
+        [cmd, "/c", str(cmd_wrapper), "install", "status", "--profile", ".."],
+        env=env,
+        check=False,
+    )
+    assert invalid_profile.returncode != 0
+    assert "Invalid profile name '..'" in invalid_profile.stderr
+
+    missing_profile_value = _run(
+        [cmd, "/c", str(cmd_wrapper), "install", "apply", "--profile"],
+        env=env,
+        check=False,
+    )
+    assert missing_profile_value.returncode != 0
+    assert "Option --profile requires a value" in missing_profile_value.stderr
+
+    missing_proxy_port = _run(
+        [cmd, "/c", str(cmd_wrapper), "proxy", "--port"],
+        env=env,
+        check=False,
+    )
+    assert missing_proxy_port.returncode != 0
+    assert "Option --port requires a value" in missing_proxy_port.stderr
+
+    invalid_proxy_port = _run(
+        [cmd, "/c", str(cmd_wrapper), "proxy", "--port", "abc"],
+        env=env,
+        check=False,
+    )
+    assert invalid_proxy_port.returncode != 0
+    assert "Invalid port 'abc'" in invalid_proxy_port.stderr
+
+    missing_wrap_port = _run(
+        [cmd, "/c", str(cmd_wrapper), "wrap", "claude", "--port"],
+        env=env,
+        check=False,
+    )
+    assert missing_wrap_port.returncode != 0
+    assert "Option --port requires a value" in missing_wrap_port.stderr
+
+    invalid_wrap_port = _run(
+        [cmd, "/c", str(cmd_wrapper), "wrap", "claude", "--port", "abc"],
+        env=env,
+        check=False,
+    )
+    assert invalid_wrap_port.returncode != 0
+    assert "Invalid port 'abc'" in invalid_wrap_port.stderr
+
+    missing_openclaw_proxy_port = _run(
+        [cmd, "/c", str(cmd_wrapper), "wrap", "openclaw", "--proxy-port"],
+        env=env,
+        check=False,
+    )
+    assert missing_openclaw_proxy_port.returncode != 0
+    assert "Option --proxy-port requires a value" in missing_openclaw_proxy_port.stderr
+
+    invalid_openclaw_proxy_port = _run(
+        [cmd, "/c", str(cmd_wrapper), "wrap", "openclaw", "--proxy-port", "abc"],
+        env=env,
+        check=False,
+    )
+    assert invalid_openclaw_proxy_port.returncode != 0
+    assert "Invalid port 'abc'" in invalid_openclaw_proxy_port.stderr
+
+    for invalid_port in ("abc", "0", "65536"):
+        invalid_port_result = _run(
+            [cmd, "/c", str(cmd_wrapper), "install", "apply", "--port", invalid_port],
+            env=env,
+            check=False,
+        )
+        assert invalid_port_result.returncode != 0
+        assert f"Invalid port '{invalid_port}'" in invalid_port_result.stderr
+
+
+def _assert_powershell_lifecycle(
+    powershell: str, wrapper: Path, env: dict[str, str], home: Path
+) -> None:
+    """Drive the persistent-docker lifecycle through the .ps1 wrapper."""
+    port = _free_port()
+    _run(
+        [
+            powershell,
+            *_PS_EXEC_ARGS,
+            str(wrapper),
+            "install",
+            "apply",
+            "--profile",
+            "smoke",
+            "--port",
+            str(port),
+            "--memory",
+            "--no-telemetry",
+            "--image",
+            "fake/headroom:test",
+        ],
+        env=env,
+    )
+
+    manifest_path = home / ".headroom" / "deploy" / "smoke" / "manifest.json"
+    state_path = home / ".headroom" / "deploy" / "smoke" / "docker-native.json"
+    manifest_bytes = manifest_path.read_bytes()
+    state_bytes = state_path.read_bytes()
+    assert not manifest_bytes.startswith(b"\xef\xbb\xbf")
+    assert not state_bytes.startswith(b"\xef\xbb\xbf")
+    manifest = json.loads(manifest_bytes.decode("utf-8"))
+    state = json.loads(state_bytes.decode("utf-8"))
+    assert manifest["preset"] == "persistent-docker"
+    assert manifest["port"] == port
+    assert manifest["memory_enabled"] is True
+    assert manifest["memory_db_path"] == "/tmp/headroom-home/.headroom/memory.db"
+    assert manifest["telemetry_enabled"] is False
+    assert state["container_name"] == "headroom-smoke"
+
+    docker_calls = _read_fake_docker_log(env)
+    help_call = next(
+        call
+        for call in docker_calls
+        if call[:2] == ["run", "--rm"] and "--entrypoint" in call and "--help" in call
+    )
+    assert "-it" not in help_call
+    proxy_help_call = next(
+        call
+        for call in docker_calls
+        if call[:2] == ["run", "--rm"] and "-p" in call and "proxy" in call and "--help" in call
+    )
+    assert "-it" not in proxy_help_call
+    install_call = next(
+        call for call in docker_calls if call[:2] == ["run", "-d"] and "--name" in call
+    )
+    assert "/tmp/headroom-home/.headroom/memory.db" in install_call
+    # Canonical filesystem contract env vars (issue #175).
+    assert "HEADROOM_WORKSPACE_DIR=/tmp/headroom-home/.headroom" in install_call
+    assert "HEADROOM_CONFIG_DIR=/tmp/headroom-home/.headroom/config" in install_call
+
+    status_result = _run(
+        [
+            powershell,
+            *_PS_EXEC_ARGS,
+            str(wrapper),
+            "install",
+            "status",
+            "--profile",
+            "smoke",
+        ],
+        env=env,
+    )
+    assert "Status:     running" in status_result.stdout
+
+    _run(
+        [powershell, *_PS_EXEC_ARGS, str(wrapper), "install", "stop", "--profile", "smoke"],
+        env=env,
+    )
+    stopped_result = _run(
+        [
+            powershell,
+            *_PS_EXEC_ARGS,
+            str(wrapper),
+            "install",
+            "status",
+            "--profile",
+            "smoke",
+        ],
+        env=env,
+    )
+    assert "Status:     stopped" in stopped_result.stdout
+
+    _run(
+        [powershell, *_PS_EXEC_ARGS, str(wrapper), "install", "start", "--profile", "smoke"],
+        env=env,
+    )
+    started_result = _run(
+        [
+            powershell,
+            *_PS_EXEC_ARGS,
+            str(wrapper),
+            "install",
+            "status",
+            "--profile",
+            "smoke",
+        ],
+        env=env,
+    )
+    assert "Status:     running" in started_result.stdout
+
+    rejected = _run(
+        [
+            powershell,
+            *_PS_EXEC_ARGS,
+            str(wrapper),
+            "install",
+            "apply",
+            "--scope",
+            "user",
+        ],
+        env=env,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert (
+        "does not support provider/user/system mutation flags"
+        in _normalize_powershell_error_text(rejected.stderr)
+    )
+
+    _run(
+        [powershell, *_PS_EXEC_ARGS, str(wrapper), "install", "restart", "--profile", "smoke"],
+        env=env,
+    )
+    _run(
+        [powershell, *_PS_EXEC_ARGS, str(wrapper), "install", "remove", "--profile", "smoke"],
+        env=env,
+    )
+    assert not manifest_path.parent.exists()
+
+
+def _prepare_powershell_install(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """Common environment + temp layout for the PowerShell installer tests."""
     home = tmp_path / "home"
     (home / ".local").mkdir(parents=True)
     env = _build_env(home, tmp_path)
     env["HEADROOM_DOCKER_IMAGE"] = "headroom:test-image"
+    return home, env
 
+
+@pytest.mark.skipif(
+    _powershell_executable() is None,
+    reason="PowerShell native installer coverage requires pwsh or Windows PowerShell",
+)
+def test_powershell_native_installer_supports_persistent_docker_lifecycle(tmp_path: Path) -> None:
+    """Drive the .ps1 wrapper through the persistent-docker lifecycle.
+
+    Runs on any host with ``pwsh`` (or Windows PowerShell) available, so
+    Linux CI exercises the same script path Windows users do. The companion
+    ``test_powershell_cmd_wrapper_supports_lifecycle`` test covers the
+    ``headroom.cmd`` wrapper on hosts with cmd.exe.
+    """
+    powershell = _powershell_executable()
+    assert powershell is not None
+
+    home, env = _prepare_powershell_install(tmp_path)
     try:
-        _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(REPO_ROOT / "scripts" / "install.ps1"),
-            ],
-            env=env,
-            cwd=REPO_ROOT,
-        )
+        _run_powershell_install(powershell, env)
+        wrapper, _cmd_wrapper = _assert_powershell_wrappers_installed(home)
+        _run_powershell_help(powershell, wrapper, env)
+        _assert_powershell_lifecycle(powershell, wrapper, env, home)
+    finally:
+        _cleanup_fake_docker(env)
 
-        wrapper = home / ".local" / "bin" / "headroom.ps1"
-        assert wrapper.exists()
-        assert "__HEADROOM_INSTALL_IMAGE__" not in wrapper.read_text(encoding="utf-8")
-        assert "headroom:test-image" in wrapper.read_text(encoding="utf-8")
-        cmd_wrapper = home / ".local" / "bin" / "headroom.cmd"
-        assert cmd_wrapper.exists()
 
-        help_result = _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "install",
-                "-?",
-            ],
-            env=env,
-        )
-        _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "proxy",
-                "--help",
-            ],
-            env=env,
-        )
-        assert "persistent-docker preset only" in help_result.stdout
-        cmd_help_result = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "install", "-?"],
-            env=env,
-        )
-        assert "persistent-docker preset only" in cmd_help_result.stdout
-        _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "--help",
-            ],
-            env=env,
-        )
-        wrap_help = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "wrap", "--help"],
-            env=env,
-        )
-        assert "Supported commands:" in wrap_help.stdout
-        assert "copilot" not in wrap_help.stdout
-        unsupported_wrap = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "wrap", "copilot", "--help"],
-            env=env,
-            check=False,
-        )
-        assert unsupported_wrap.returncode != 0
-        assert "does not support 'wrap copilot'" in unsupported_wrap.stderr
-        invalid_profile = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "install", "status", "--profile", ".."],
-            env=env,
-            check=False,
-        )
-        assert invalid_profile.returncode != 0
-        assert "Invalid profile name '..'" in invalid_profile.stderr
-        missing_profile_value = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "install", "apply", "--profile"],
-            env=env,
-            check=False,
-        )
-        assert missing_profile_value.returncode != 0
-        assert "Option --profile requires a value" in missing_profile_value.stderr
-        missing_proxy_port = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "proxy", "--port"],
-            env=env,
-            check=False,
-        )
-        assert missing_proxy_port.returncode != 0
-        assert "Option --port requires a value" in missing_proxy_port.stderr
-        invalid_proxy_port = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "proxy", "--port", "abc"],
-            env=env,
-            check=False,
-        )
-        assert invalid_proxy_port.returncode != 0
-        assert "Invalid port 'abc'" in invalid_proxy_port.stderr
-        missing_wrap_port = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "wrap", "claude", "--port"],
-            env=env,
-            check=False,
-        )
-        assert missing_wrap_port.returncode != 0
-        assert "Option --port requires a value" in missing_wrap_port.stderr
-        invalid_wrap_port = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "wrap", "claude", "--port", "abc"],
-            env=env,
-            check=False,
-        )
-        assert invalid_wrap_port.returncode != 0
-        assert "Invalid port 'abc'" in invalid_wrap_port.stderr
-        missing_openclaw_proxy_port = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "wrap", "openclaw", "--proxy-port"],
-            env=env,
-            check=False,
-        )
-        assert missing_openclaw_proxy_port.returncode != 0
-        assert "Option --proxy-port requires a value" in missing_openclaw_proxy_port.stderr
-        invalid_openclaw_proxy_port = _run(
-            ["cmd.exe", "/c", str(cmd_wrapper), "wrap", "openclaw", "--proxy-port", "abc"],
-            env=env,
-            check=False,
-        )
-        assert invalid_openclaw_proxy_port.returncode != 0
-        assert "Invalid port 'abc'" in invalid_openclaw_proxy_port.stderr
-        for invalid_port in ("abc", "0", "65536"):
-            invalid_port_result = _run(
-                ["cmd.exe", "/c", str(cmd_wrapper), "install", "apply", "--port", invalid_port],
-                env=env,
-                check=False,
-            )
-            assert invalid_port_result.returncode != 0
-            assert f"Invalid port '{invalid_port}'" in invalid_port_result.stderr
+@pytest.mark.skipif(
+    _powershell_executable() is None,
+    reason="cmd wrapper coverage requires a host that ran the PowerShell installer first",
+)
+@pytest.mark.skipif(
+    _cmd_executable() is None,
+    reason="cmd wrapper coverage requires cmd.exe (Windows)",
+)
+def test_powershell_cmd_wrapper_supports_lifecycle(tmp_path: Path) -> None:
+    """Drive the ``headroom.cmd`` wrapper surfaces that mirror .ps1 help/error paths.
 
-        port = _free_port()
-        _run(
-            [
-                "cmd.exe",
-                "/c",
-                str(cmd_wrapper),
-                "install",
-                "apply",
-                "--profile",
-                "smoke",
-                "--port",
-                str(port),
-                "--memory",
-                "--no-telemetry",
-                "--image",
-                "fake/headroom:test",
-            ],
-            env=env,
-        )
+    Explicitly skipped when cmd.exe is unavailable so the missing-coverage is
+    visible in pytest's skip report rather than hidden behind an inline
+    ``if cmd:`` branch.
+    """
+    powershell = _powershell_executable()
+    cmd = _cmd_executable()
+    assert powershell is not None
+    assert cmd is not None
 
-        manifest_path = home / ".headroom" / "deploy" / "smoke" / "manifest.json"
-        state_path = home / ".headroom" / "deploy" / "smoke" / "docker-native.json"
-        manifest_bytes = manifest_path.read_bytes()
-        state_bytes = state_path.read_bytes()
-        assert not manifest_bytes.startswith(b"\xef\xbb\xbf")
-        assert not state_bytes.startswith(b"\xef\xbb\xbf")
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-        state = json.loads(state_bytes.decode("utf-8"))
-        assert manifest["preset"] == "persistent-docker"
-        assert manifest["port"] == port
-        assert manifest["memory_enabled"] is True
-        assert manifest["memory_db_path"] == "/tmp/headroom-home/.headroom/memory.db"
-        assert manifest["telemetry_enabled"] is False
-        assert state["container_name"] == "headroom-smoke"
-
-        docker_calls = _read_fake_docker_log(env)
-        help_call = next(
-            call
-            for call in docker_calls
-            if call[:2] == ["run", "--rm"] and "--entrypoint" in call and "--help" in call
-        )
-        assert "-it" not in help_call
-        proxy_help_call = next(
-            call
-            for call in docker_calls
-            if call[:2] == ["run", "--rm"] and "-p" in call and "proxy" in call and "--help" in call
-        )
-        assert "-it" not in proxy_help_call
-        install_call = next(
-            call for call in docker_calls if call[:2] == ["run", "-d"] and "--name" in call
-        )
-        assert "/tmp/headroom-home/.headroom/memory.db" in install_call
-        # Canonical filesystem contract env vars (issue #175).
-        assert "HEADROOM_WORKSPACE_DIR=/tmp/headroom-home/.headroom" in install_call
-        assert "HEADROOM_CONFIG_DIR=/tmp/headroom-home/.headroom/config" in install_call
-
-        status_result = _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "install",
-                "status",
-                "--profile",
-                "smoke",
-            ],
-            env=env,
-        )
-        assert "Status:     running" in status_result.stdout
-
-        _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "install",
-                "stop",
-                "--profile",
-                "smoke",
-            ],
-            env=env,
-        )
-        stopped_result = _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "install",
-                "status",
-                "--profile",
-                "smoke",
-            ],
-            env=env,
-        )
-        assert "Status:     stopped" in stopped_result.stdout
-
-        _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "install",
-                "start",
-                "--profile",
-                "smoke",
-            ],
-            env=env,
-        )
-        started_result = _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "install",
-                "status",
-                "--profile",
-                "smoke",
-            ],
-            env=env,
-        )
-        assert "Status:     running" in started_result.stdout
-
-        rejected = _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "install",
-                "apply",
-                "--scope",
-                "user",
-            ],
-            env=env,
-            check=False,
-        )
-        assert rejected.returncode != 0
-        assert "does not support provider/user/system mutation flags" in rejected.stderr
-
-        _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "install",
-                "restart",
-                "--profile",
-                "smoke",
-            ],
-            env=env,
-        )
-        _run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(wrapper),
-                "install",
-                "remove",
-                "--profile",
-                "smoke",
-            ],
-            env=env,
-        )
-        assert not manifest_path.parent.exists()
+    home, env = _prepare_powershell_install(tmp_path)
+    try:
+        _run_powershell_install(powershell, env)
+        _wrapper, cmd_wrapper = _assert_powershell_wrappers_installed(home)
+        _assert_cmd_wrapper_lifecycle(cmd, cmd_wrapper, env)
     finally:
         _cleanup_fake_docker(env)

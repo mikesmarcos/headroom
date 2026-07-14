@@ -131,6 +131,9 @@ from headroom.providers.opencode.config import (
     snapshot_opencode_config_if_unwrapped,
     strip_opencode_headroom_blocks,
 )
+from headroom.providers.opencode.runtime import (
+    headroom_client_host as _headroom_opencode_client_host,
+)
 from headroom.proxy.project_context import with_project_prefix as _with_project_prefix
 
 from .main import main
@@ -6085,7 +6088,8 @@ def opencode(
         _inject_memory_agents_md(agents_md)
 
     if prepare_only:
-        inject_opencode_provider_config(port)
+        host = _headroom_opencode_client_host()
+        inject_opencode_provider_config(port, host=host)
         return
 
     opencode_bin = shutil.which("opencode")
@@ -6123,12 +6127,17 @@ def opencode(
 
             _setup_headroom_mcp(OpencodeRegistrar(), actual_port, verbose=verbose, force=True)
 
+    host = _headroom_opencode_client_host()
     env, env_vars_display = _build_opencode_launch_env(
-        actual_port, os.environ, project=_project_name_from_cwd(), include_mcp=not no_mcp
+        actual_port,
+        os.environ,
+        project=_project_name_from_cwd(),
+        host=host,
+        include_mcp=not no_mcp,
     )
 
     # Inject Headroom provider into OpenCode config so traffic routes through proxy.
-    inject_opencode_provider_config(actual_port)
+    inject_opencode_provider_config(actual_port, host=host)
     if memory:
         mem_dir = Path.cwd() / ".headroom"
         _inject_memory_mcp_config(
