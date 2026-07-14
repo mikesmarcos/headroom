@@ -531,18 +531,35 @@ def test_build_opencode_config_content_without_mcp(
     assert config["plugin"] == [str(plugin)]
 
 
-def test_build_opencode_config_content_skips_plugin_when_unbuilt(
+def test_build_opencode_config_content_raises_on_plugin_path_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from headroom.providers.opencode.runtime import build_opencode_config_content
 
-    # An override pointing at a missing file resolves to None → no plugin entry,
-    # but native-provider routing still applies (the pip-only fallback).
+    # An override pointing at a missing file must raise with a clear error
+    # message mentioning headroom-opencode, dist/entry.opencode.js, and how
+    # to install/rebuild.
     monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_PATH", str(tmp_path / "missing.js"))
-    config = build_opencode_config_content(port=8787, host="127.0.0.1")
-    assert "plugin" not in config
-    providers = cast(dict[str, Any], config["provider"])
-    assert providers["anthropic"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+    with pytest.raises(RuntimeError) as exc_info:
+        build_opencode_config_content(port=8787, host="127.0.0.1")
+    msg = str(exc_info.value)
+    assert "HEADROOM_OPENCODE_PLUGIN_PATH" in msg
+    assert "headroom-opencode" in msg
+    assert "dist/entry.opencode.js" in msg
+
+
+def test_build_opencode_config_content_raises_on_artifact_dir_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from headroom.providers.opencode.runtime import build_opencode_config_content
+
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", str(tmp_path / "package"))
+    with pytest.raises(RuntimeError) as exc_info:
+        build_opencode_config_content(port=8787, host="127.0.0.1")
+    msg = str(exc_info.value)
+    assert "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR" in msg
+    assert "headroom-opencode" in msg
+    assert "dist/entry.opencode.js" in msg
 
 
 def test_build_opencode_config_content_brackets_ipv6() -> None:
@@ -687,6 +704,96 @@ def test_headroom_opencode_plugin_constant_is_published_package_name() -> None:
     OpenCode installs must resolve the plugin from this published artifact.
     """
     assert HEADROOM_OPENCODE_PLUGIN == "headroom-opencode"
+
+
+def test_headroom_opencode_plugin_path_from_artifact_dir(tmp_path: Path) -> None:
+    """HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR resolves dist/entry.opencode.js."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    artifact = tmp_path / "headroom-opencode"
+    entry = artifact / "dist" / "entry.opencode.js"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("export default () => {}", encoding="utf-8")
+
+    path = headroom_opencode_plugin_path(
+        env={"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(artifact)}
+    )
+    assert path == str(entry)
+
+
+def test_headroom_opencode_plugin_path_artifact_dir_missing(tmp_path: Path) -> None:
+    """HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR with missing file raises."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    artifact = tmp_path / "headroom-opencode"
+    with pytest.raises(RuntimeError) as exc_info:
+        headroom_opencode_plugin_path(env={"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(artifact)})
+    msg = str(exc_info.value)
+    assert "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR" in msg
+    assert "headroom-opencode" in msg
+    assert "dist/entry.opencode.js" in msg
+
+
+def test_headroom_opencode_plugin_path_no_env_returns_none() -> None:
+    """No plugin env var means no plugin — provider-only routing."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    assert headroom_opencode_plugin_path(env={}) is None
+    assert headroom_opencode_plugin_path(env={"HEADROOM_HOST": "127.0.0.1"}) is None
+    assert headroom_opencode_plugin_path(env={"HEADROOM_OPENCODE_PLUGIN_PATH": ""}) is None
+    assert (
+        headroom_opencode_plugin_path(env={"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": "   "}) is None
+    )
+
+
+def test_headroom_opencode_plugin_path_prefers_plugin_path_over_artifact_dir(
+    tmp_path: Path,
+) -> None:
+    """HEADROOM_OPENCODE_PLUGIN_PATH takes precedence over ARTIFACT_DIR."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    # Artifact dir has the entry but plugin path points elsewhere (and exists).
+    artifact = tmp_path / "artifact"
+    (artifact / "dist").mkdir(parents=True)
+    (artifact / "dist" / "entry.opencode.js").write_text(
+        "export default () => {}", encoding="utf-8"
+    )
+    plugin_path = tmp_path / "custom" / "entry.opencode.js"
+    plugin_path.parent.mkdir(parents=True)
+    plugin_path.write_text("export default () => {}", encoding="utf-8")
+
+    path = headroom_opencode_plugin_path(
+        env={
+            "HEADROOM_OPENCODE_PLUGIN_PATH": str(plugin_path),
+            "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(artifact),
+        }
+    )
+    assert path == str(plugin_path)
+
+
+def test_headroom_opencode_plugin_path_raises_on_missing_plugin_path_with_artifact_dir(
+    tmp_path: Path,
+) -> None:
+    """Missing HEADROOM_OPENCODE_PLUGIN_PATH raises even when ARTIFACT_DIR is valid."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    artifact = tmp_path / "artifact"
+    (artifact / "dist").mkdir(parents=True)
+    (artifact / "dist" / "entry.opencode.js").write_text(
+        "export default () => {}", encoding="utf-8"
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        headroom_opencode_plugin_path(
+            env={
+                "HEADROOM_OPENCODE_PLUGIN_PATH": str(tmp_path / "missing.js"),
+                "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(artifact),
+            }
+        )
+    msg = str(exc_info.value)
+    assert "HEADROOM_OPENCODE_PLUGIN_PATH" in msg
+    # Error must not fall through to artifact dir resolution.
+    assert "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR" not in msg
 
 
 def test_build_opencode_config_content_does_not_autoload_development_checkout(

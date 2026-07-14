@@ -92,6 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **opencode:** native plugin loading now requires an explicitly configured
   stable artifact path instead of auto-discovering
   `plugins/opencode/dist/entry.opencode.js` from a mutable development checkout.
+  Runtime resolution accepts either `HEADROOM_OPENCODE_PLUGIN_PATH` pointing
+  directly at the built entry file or `HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR`
+  pointing at an unpacked `headroom-opencode` package root; missing configured
+  artifacts now fail with install/rebuild guidance instead of silently skipping
+  the native plugin ([#15](https://github.com/mikesmarcos/headroom/issues/15)).
   Provider `baseURL` routing remains the default operational integration and
   continues to work without the native plugin; generated OpenCode proxy URLs now
   honor `HEADROOM_HOST` instead of hard-coding `127.0.0.1`

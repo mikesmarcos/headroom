@@ -72,8 +72,18 @@ def headroom_opencode_plugin_path(env: Mapping[str, str] | None = None) -> str |
     Operational wrapping does not discover ``plugins/opencode/dist`` from a
     mutable development checkout. Installers that enable the optional native
     plugin must resolve a stable artifact and pass that explicit path through
-    ``HEADROOM_OPENCODE_PLUGIN_PATH``. Without that configured artifact, wrap
-    falls back to provider ``baseURL`` routing.
+    one of:
+
+    * ``HEADROOM_OPENCODE_PLUGIN_PATH`` — direct path to the plugin entry
+      (``dist/entry.opencode.js`` from the ``headroom-opencode`` npm package).
+    * ``HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR`` — root of the unpacked
+      ``headroom-opencode`` npm package; resolves
+      ``{ARTIFACT_DIR}/dist/entry.opencode.js``.
+
+    When set but the expected file does not exist, a :class:`RuntimeError`
+    is raised with a message explaining how to install or rebuild the stable
+    artifact. Without either variable, returns ``None`` and the caller falls
+    back to provider ``baseURL`` routing.
 
     The plugin's loader entry exports ONLY the plugin function
     (``dist/entry.opencode.js``); the library barrel cannot be loaded directly
@@ -82,7 +92,34 @@ def headroom_opencode_plugin_path(env: Mapping[str, str] | None = None) -> str |
     environ = env if env is not None else os.environ
     override = environ.get("HEADROOM_OPENCODE_PLUGIN_PATH", "").strip()
     if override:
-        return override if Path(override).is_file() else None
+        path = Path(override)
+        if path.is_file():
+            return str(path)
+        raise RuntimeError(
+            f"OpenCode transport plugin not found at "
+            f"HEADROOM_OPENCODE_PLUGIN_PATH={override}. "
+            f"The plugin entry point dist/entry.opencode.js from the "
+            f"headroom-opencode npm package is required. "
+            f"Install or rebuild the stable artifact: ensure headroom-opencode "
+            f"is installed and HEADROOM_OPENCODE_PLUGIN_PATH points directly "
+            f"to its dist/entry.opencode.js file."
+        )
+
+    artifact_dir = environ.get("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", "").strip()
+    if artifact_dir:
+        candidate = Path(artifact_dir) / "dist" / "entry.opencode.js"
+        if candidate.is_file():
+            return str(candidate)
+        raise RuntimeError(
+            f"OpenCode transport plugin not found: {candidate}. "
+            f"The plugin entry point dist/entry.opencode.js from the "
+            f"headroom-opencode npm package was expected at "
+            f"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR={artifact_dir}. "
+            f"Install or rebuild the stable artifact: ensure headroom-opencode "
+            f"is installed and HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR points "
+            f"to the unpacked package root."
+        )
+
     return None
 
 
