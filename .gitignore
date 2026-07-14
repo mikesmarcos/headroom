@@ -245,8 +245,7 @@ headroom-managed/
 # uv lockfile: regenerated locally; not committed
 uv.lock
 # Graphify local/generated outputs.
-graphify-out/cost.json
-graphify-out/cache/
+graphify-out/
 
 # Rust extension `.so` symlinks placed by `scripts/build_rust_extension.sh`
 # into the `headroom/` package dir for local development. The real binary
