@@ -86,7 +86,9 @@ def _resolve_anthropic_transport_path(request_headers: dict[str, str], *, defaul
     return parsed.path
 
 
-def _anthropic_outcome_provider(request_headers: dict[str, str], client: str | None, provider_name: str) -> str:
+def _anthropic_outcome_provider(
+    request_headers: dict[str, str], client: str | None, provider_name: str
+) -> str:
     if client == "opencode" and (
         _header_get(request_headers, _ANTHROPIC_BASE_URL_HEADER)
         or _header_get(request_headers, _ANTHROPIC_ORIGINAL_PATH_HEADER)
@@ -3528,7 +3530,10 @@ class AnthropicHandlerMixin:
                     # blocks every other request for the duration; a timeout
                     # here is caught below and passes the item through.
                     result = await self._run_compression_in_executor(
-                        lambda messages=messages, model=model, context_limit=context_limit, frozen_message_count=frozen_message_count: (
+                        lambda messages=messages,
+                        model=model,
+                        context_limit=context_limit,
+                        frozen_message_count=frozen_message_count: (
                             self.anthropic_pipeline.apply(
                                 messages=messages,
                                 model=model,
