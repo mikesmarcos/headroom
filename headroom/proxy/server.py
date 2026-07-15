@@ -2053,7 +2053,7 @@ def _request_can_view_dashboard_metadata(
         host_header = request.headers.get("host")
     except AttributeError:
         return False
-    if not is_ip_literal_host_header(host_header):
+    if host_header is None or not is_ip_literal_host_header(host_header):
         return False
 
     # CIDR authorization makes this endpoint usable by a remote dashboard, but
