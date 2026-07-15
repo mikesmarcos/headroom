@@ -2282,6 +2282,8 @@ def _run_proxy_only_watcher(
     memory: bool,
     agent_type: str,
     print_setup_lines: Callable[[int], None],
+    openai_api_url: str | None = None,
+    anthropic_api_url: str | None = None,
 ) -> None:
     """Shared scaffolding for proxy-only wrap subcommands (no child binary launch).
 
@@ -2304,7 +2306,13 @@ def _run_proxy_only_watcher(
         _print_wrap_banner(agent_label)
         _register_proxy_client(port)
         proxy_holder[0], actual_port = _ensure_proxy(
-            port, no_proxy, learn=learn, memory=memory, agent_type=agent_type
+            port,
+            no_proxy,
+            learn=learn,
+            memory=memory,
+            agent_type=agent_type,
+            openai_api_url=openai_api_url,
+            anthropic_api_url=anthropic_api_url,
         )
         if actual_port != port:
             _unregister_proxy_client(port)
@@ -5634,6 +5642,25 @@ def zcode(
         anthropic_api_url=anthropic_url,
         openai_api_url=openai_url,
     )
+
+
+@unwrap.command("zcode")
+@click.option(
+    "--port", "-p", default=8787, type=click.IntRange(1, 65535), help="Proxy port (default: 8787)"
+)
+@click.option("--no-stop-proxy", is_flag=True, help="Do not stop the local Headroom proxy")
+def unwrap_zcode(port: int, no_stop_proxy: bool) -> None:
+    """Undo durable setup from ``headroom wrap zcode``."""
+    agents_md = Path.cwd() / "AGENTS.md"
+    if _remove_rtk_instructions(agents_md):
+        click.echo("  Removed Headroom rtk instructions from AGENTS.md.")
+        status = "cleaned"
+    else:
+        click.echo("  Nothing to undo: AGENTS.md has no Headroom wrap markers.")
+        status = "noop"
+
+    if not no_stop_proxy and status != "noop":
+        _echo_unwrap_proxy_stop_status(_stop_local_proxy_for_unwrap(port), port)
 
 
 # =============================================================================

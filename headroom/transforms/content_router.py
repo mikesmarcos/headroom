@@ -2589,17 +2589,19 @@ class ContentRouter(Transform):
                         self._kompress_warned = True
                 else:
                     try:
-                        result = compressor.compress(
-                            text_to_compress,
-                            context=context,
-                            question=question,
-                            target_ratio=(
+                        compress_kwargs: dict[str, object] = {
+                            "context": context,
+                            "question": question,
+                            "target_ratio": (
                                 target_ratio
                                 if target_ratio is not None
                                 else getattr(self, "_runtime_target_ratio", None)
                             ),
-                            allow_download=False,
-                        )
+                            "allow_download": False,
+                        }
+                        if protected:
+                            compress_kwargs["ccr_original"] = content
+                        result = compressor.compress(text_to_compress, **compress_kwargs)
                         compressed = result.compressed
                         compressed_tokens = result.compressed_tokens
                     except Exception as e:

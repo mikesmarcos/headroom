@@ -121,7 +121,7 @@ sub greet {
 
     result = _compressor().compress(code)
 
-    assert result.language == CodeLanguage.UNKNOWN
+    assert result.language == CodeLanguage.PERL
     assert result.compressed == code
     assert "perl" not in calls
 
@@ -168,6 +168,9 @@ func main() {
         assert "go" in calls
 
 
-def test_get_parser_refuses_quarantined_perl():
-    with pytest.raises(ValueError, match="quarantined"):
-        cc._get_parser("perl")
+def test_get_parser_handles_perl_normally():
+    """Perl is a fully supported language (quarantine removed)."""
+    if not cc._tree_sitter_importable():
+        pytest.skip("tree-sitter not available")
+    result = cc._get_parser("perl")
+    assert result is not None

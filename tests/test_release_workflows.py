@@ -621,7 +621,7 @@ def test_openclaw_source_dependency_matches_lockfile_registry_range() -> None:
     source_range = package_json["dependencies"]["headroom-ai"]
     lock_range = package_lock["packages"][""]["dependencies"]["headroom-ai"]
 
-    assert source_range == lock_range == "^0.22.3"
+    assert source_range == lock_range == "^0.31.0"
 
 
 def test_python_release_smoke_imports_installed_wheel_outside_source_tree() -> None:
