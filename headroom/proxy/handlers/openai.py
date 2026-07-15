@@ -5309,7 +5309,9 @@ class OpenAIHandlerMixin:
             upstream: Any = None
             from headroom.proxy.helpers import merge_extra_headers
 
-            upstream_headers = merge_extra_headers(upstream_headers, self.config.openai_extra_headers)
+            upstream_headers = merge_extra_headers(
+                upstream_headers, self.config.openai_extra_headers
+            )
 
             for ws_attempt in range(ws_connect_attempts):
                 try:
