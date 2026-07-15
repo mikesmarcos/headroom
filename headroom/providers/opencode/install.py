@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -21,6 +22,7 @@ from .config import (
     snapshot_opencode_config_if_unwrapped,
     strip_opencode_headroom_blocks,
 )
+from .runtime import headroom_opencode_plugin_path
 
 # Well-known plugin artifact contract. The package version is intentionally
 # explicit: operational installs must not resolve mutable npm tags like latest.
@@ -68,9 +70,7 @@ def _npm_pack_plugin(package_spec: str, *, pack_dir: Path) -> Path | None:
     return None
 
 
-def prepare_opencode_plugin_artifact(
-    *, dest_dir: Path | None = None
-) -> Path:
+def prepare_opencode_plugin_artifact(*, dest_dir: Path | None = None) -> Path:
     """Ensure the OpenCode transport plugin artifact is installed at a stable location.
 
     The plugin artifact is resolved from the explicit versioned npm package
@@ -126,9 +126,7 @@ def prepare_opencode_plugin_artifact(
 
         package_root = extract_dir / "package"
         if not (package_root / _PLUGIN_ENTRY_REL).is_file():
-            raise _plugin_artifact_error(
-                f"package tarball does not contain {_PLUGIN_ENTRY_REL}"
-            )
+            raise _plugin_artifact_error(f"package tarball does not contain {_PLUGIN_ENTRY_REL}")
 
         shutil.copytree(package_root, dest_dir, dirs_exist_ok=True)
 
@@ -173,6 +171,26 @@ def apply_provider_scope(manifest: DeploymentManifest) -> ManagedMutation | None
 
     provider = {"headroom": headroom_provider_entry(manifest.port, host=manifest.host)}
     data = _inject_key_into_json(data, "provider", provider)
+
+    # Inject plugin reference from managed operational artifact (issue #17).
+    tool_env = manifest.tool_envs.get(ToolTarget.OPENCODE.value, {})
+    if "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR" in tool_env:
+        artifact_dir = tool_env["HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR"]
+    else:
+        artifact_dir = os.environ.get("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", "")
+    plugin_path = headroom_opencode_plugin_path(
+        env={"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": artifact_dir}
+    )
+    if plugin_path:
+        plugins = data.get("plugin")
+        if isinstance(plugins, str):
+            plugins = [plugins]
+            data["plugin"] = plugins
+        if not isinstance(plugins, list):
+            plugins = []
+            data["plugin"] = plugins
+        if plugin_path not in plugins:
+            plugins.append(plugin_path)
 
     config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return ManagedMutation(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tarfile
 from pathlib import Path
@@ -129,14 +130,10 @@ def test_prepare_artifact_creates_dist_from_versioned_package(
 
     assert result == dest
     assert (dest / "dist" / "entry.opencode.js").is_file()
-    assert (dest / "dist" / "entry.opencode.js").read_text(encoding="utf-8") == (
-        _PLUGIN_BODY
-    )
+    assert (dest / "dist" / "entry.opencode.js").read_text(encoding="utf-8") == (_PLUGIN_BODY)
 
 
-def test_prepare_artifact_idempotent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_prepare_artifact_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """prepare_opencode_plugin_artifact does not overwrite an existing artifact."""
     monkeypatch.setattr(
         "headroom.providers.opencode.install._npm_pack_plugin",
@@ -185,6 +182,215 @@ def test_prepare_artifact_raises_when_package_unavailable(
 # ---------------------------------------------------------------------------
 
 
+def test_apply_provider_scope_includes_plugin_from_artifact_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope injects plugin path from tool_envs artifact dir."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+
+    # Create plugin artifact at a known location.
+    plugin_dir = tmp_path / "managed" / "headroom-opencode"
+    plugin_entry = plugin_dir / "dist" / "entry.opencode.js"
+    plugin_entry.parent.mkdir(parents=True)
+    plugin_entry.write_text("export default () => {}", encoding="utf-8")
+    checkout_entry = tmp_path / "checkout" / "plugins" / "opencode" / "dist" / "entry.opencode.js"
+    checkout_entry.parent.mkdir(parents=True)
+    checkout_entry.write_text("export default () => {}", encoding="utf-8")
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_PATH", str(checkout_entry))
+
+    manifest = _manifest(port=8787)
+    manifest.tool_envs["opencode"] = {
+        "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir),
+    }
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config = json.loads(config_file.read_text())
+    assert config["plugin"] == [str(plugin_entry)]
+    # Provider block is still present.
+    assert config["provider"]["headroom"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+
+
+def test_apply_provider_scope_includes_plugin_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope injects plugin path from os.environ artifact dir."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+
+    # Create plugin artifact and set env var.
+    plugin_dir = tmp_path / "env-managed" / "headroom-opencode"
+    plugin_entry = plugin_dir / "dist" / "entry.opencode.js"
+    plugin_entry.parent.mkdir(parents=True)
+    plugin_entry.write_text("export default () => {}", encoding="utf-8")
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", str(plugin_dir))
+
+    manifest = _manifest(port=8787)
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config = json.loads(config_file.read_text())
+    assert config["plugin"] == [str(plugin_entry)]
+
+
+def test_apply_provider_scope_no_plugin_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No plugin injected when no artifact configured — even if checkout exists.
+
+    Without ``HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR`` or
+    ``HEADROOM_OPENCODE_PLUGIN_PATH``, the generated config must not contain
+    a plugin reference — even if a development checkout file happens to exist
+    on disk (issue #17, acceptance criterion 2).
+    """
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", raising=False)
+
+    # Even if a checkout-like file exists on disk, it is not auto-discovered.
+    checkout_path = tmp_path / "plugins" / "opencode" / "dist" / "entry.opencode.js"
+    checkout_path.parent.mkdir(parents=True)
+    checkout_path.write_text("export default () => {}", encoding="utf-8")
+
+    manifest = _manifest(port=8787)
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config = json.loads(config_file.read_text())
+    # No plugin key when no managed artifact is configured.
+    assert "plugin" not in config
+
+
+def test_apply_provider_scope_preserves_existing_unrelated_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope preserves existing unrelated top-level keys."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+
+    # Pre-populate config with unrelated keys.
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(
+        json.dumps(
+            {
+                "model": "openai/gpt-4o",
+                "permission": {"bash": {"*": "ask"}},
+            }
+        )
+    )
+
+    # Create plugin artifact and set env var.
+    plugin_dir = tmp_path / "managed"
+    plugin_entry = plugin_dir / "dist" / "entry.opencode.js"
+    plugin_entry.parent.mkdir(parents=True)
+    plugin_entry.write_text("export default () => {}", encoding="utf-8")
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", str(plugin_dir))
+
+    manifest = _manifest(port=8787)
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+
+    config = json.loads(config_file.read_text())
+    # Unrelated keys preserved.
+    assert config["model"] == "openai/gpt-4o"
+    assert config["permission"] == {"bash": {"*": "ask"}}
+    # Plugin and provider injected.
+    assert config["plugin"] == [str(plugin_entry)]
+    assert config["provider"]["headroom"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+
+
+def test_apply_provider_scope_preserves_existing_plugin_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope appends Headroom's artifact without removing user plugins."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(json.dumps({"plugin": ["existing-plugin"]}), encoding="utf-8")
+
+    plugin_dir = tmp_path / "managed"
+    plugin_entry = plugin_dir / "dist" / "entry.opencode.js"
+    plugin_entry.parent.mkdir(parents=True)
+    plugin_entry.write_text("export default () => {}", encoding="utf-8")
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", str(plugin_dir))
+
+    manifest = _manifest(port=8787)
+    apply_provider_scope(manifest)
+
+    config = json.loads(config_file.read_text())
+    assert config["plugin"] == ["existing-plugin", str(plugin_entry)]
+
+
+def test_apply_provider_scope_preserves_existing_string_plugin_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope preserves a user plugin encoded as a single string."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(json.dumps({"plugin": "existing-plugin"}), encoding="utf-8")
+
+    plugin_dir = tmp_path / "managed"
+    plugin_entry = plugin_dir / "dist" / "entry.opencode.js"
+    plugin_entry.parent.mkdir(parents=True)
+    plugin_entry.write_text("export default () => {}", encoding="utf-8")
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", str(plugin_dir))
+
+    manifest = _manifest(port=8787)
+    apply_provider_scope(manifest)
+
+    config = json.loads(config_file.read_text())
+    assert config["plugin"] == ["existing-plugin", str(plugin_entry)]
+
+
+def test_apply_provider_scope_raises_when_configured_artifact_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope fails clearly when the configured artifact is stale."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", str(tmp_path / "missing"))
+
+    with pytest.raises(RuntimeError, match="HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR"):
+        apply_provider_scope(_manifest(port=8787))
+
+
 def test_apply_provider_scope_creates_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -203,8 +409,6 @@ def test_apply_provider_scope_creates_config(
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     assert config_file.exists()
-    import json
-
     config = json.loads(config_file.read_text())
     assert config["provider"]["headroom"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
     assert "models" in config["provider"]["headroom"]
@@ -225,8 +429,6 @@ def test_apply_provider_scope_uses_manifest_host(
     apply_provider_scope(manifest)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
-    import json
-
     config = json.loads(config_file.read_text())
     assert config["provider"]["headroom"]["options"]["baseURL"] == "http://[::1]:8787/v1"
 
