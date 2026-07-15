@@ -12,6 +12,7 @@ from pathlib import Path
 
 from headroom import fsutil
 from headroom import paths as _paths
+from headroom._subprocess import run
 from headroom.install.models import ConfigScope, DeploymentManifest, ManagedMutation, ToolTarget
 from headroom.install.paths import opencode_config_path
 
@@ -43,7 +44,7 @@ def _plugin_artifact_error(reason: str) -> RuntimeError:
 def _npm_pack_plugin(package_spec: str, *, pack_dir: Path) -> Path | None:
     """Download the versioned plugin package into ``pack_dir`` with npm pack."""
     try:
-        result = subprocess.run(
+        result = run(
             ["npm", "pack", package_spec, "--pack-destination", str(pack_dir)],
             check=True,
             capture_output=True,
