@@ -29,6 +29,8 @@ from .config import (
     headroom_url_authority,
 )
 
+_CHECKOUT_PLUGIN_ENTRY_SUFFIX = "/plugins/opencode/dist/entry.opencode.js"
+
 
 def headroom_client_host(*, env: Mapping[str, str] | None = None) -> str:
     """Return the client-reachable proxy host for generated OpenCode config.
@@ -66,6 +68,42 @@ def proxy_base_url(port: int, host: str) -> str:
     return f"http://{headroom_url_authority(host)}:{port}/v1"
 
 
+def _reject_checkout_coupled_plugin(plugin_path: str) -> None:
+    """Raise :class:`RuntimeError` if *plugin_path* is coupled to the Headroom checkout.
+
+    Operational OpenCode installs must use the published ``headroom-opencode``
+    npm artifact, not a mutable development checkout. This function detects
+    two classes of checkout coupling:
+
+    * **npm ``file:`` dependency references** — a bare path must be used,
+      not an npm file: spec.
+    * **Repository plugin build directory** — after resolving symlinks, the
+      path must not point to a file under ``plugins/opencode/dist/``, which
+      is the layout of the Headroom source checkout.
+    """
+    # 1. Reject npm file: dependency references.
+    if plugin_path.startswith("file:"):
+        raise RuntimeError(
+            f"OpenCode plugin path must not be an npm file: dependency: "
+            f"{plugin_path!r}. Use a direct absolute path to the managed "
+            f"plugin artifact installed from the headroom-opencode npm package."
+        )
+
+    # 2. Detect checkout path after resolving symlinks.
+    resolved = str(Path(plugin_path).resolve()).replace("\\", "/")
+    # The repo checkout has plugins/opencode/dist/entry.opencode.js;
+    # the managed artifact uses plugins/headroom-opencode/dist/.
+    if _CHECKOUT_PLUGIN_ENTRY_SUFFIX in resolved:
+        raise RuntimeError(
+            f"OpenCode plugin path resolves to the Headroom development "
+            f"checkout: {plugin_path!r} -> {resolved}. Operational installs "
+            f"must load the plugin from the managed headroom-opencode npm "
+            f"artifact, not from a mutable source checkout. Install or rebuild "
+            f"the stable artifact and point HEADROOM_OPENCODE_PLUGIN_PATH or "
+            f"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR at the managed location."
+        )
+
+
 def headroom_opencode_plugin_path(env: Mapping[str, str] | None = None) -> str | None:
     """Return the configured OpenCode transport plugin path, or None.
 
@@ -92,6 +130,7 @@ def headroom_opencode_plugin_path(env: Mapping[str, str] | None = None) -> str |
     environ = env if env is not None else os.environ
     override = environ.get("HEADROOM_OPENCODE_PLUGIN_PATH", "").strip()
     if override:
+        _reject_checkout_coupled_plugin(override)
         path = Path(override)
         if path.is_file():
             return str(path)
@@ -108,6 +147,7 @@ def headroom_opencode_plugin_path(env: Mapping[str, str] | None = None) -> str |
     artifact_dir = environ.get("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", "").strip()
     if artifact_dir:
         candidate = Path(artifact_dir) / "dist" / "entry.opencode.js"
+        _reject_checkout_coupled_plugin(str(candidate))
         if candidate.is_file():
             return str(candidate)
         raise RuntimeError(
