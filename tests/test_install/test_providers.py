@@ -25,6 +25,13 @@ from headroom.providers.opencode.install import (
 )
 
 
+def _write_opencode_plugin_entry(plugin_dir: Path) -> Path:
+    entry = plugin_dir / "dist" / "entry.opencode.js"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("export default () => {}", encoding="utf-8")
+    return entry
+
+
 def _manifest(tmp_path: Path) -> DeploymentManifest:
     return DeploymentManifest(
         profile="default",
@@ -547,9 +554,16 @@ def test_revert_claude_provider_scope_ignores_missing_settings_file(tmp_path: Pa
 # ---------------------------------------------------------------------------
 
 
-def test_opencode_build_install_env_leaves_provider_env_unset() -> None:
+def test_opencode_build_install_env_sets_plugin_artifact_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Isolate from any previously-cached artifact and from the dev checkout.
+    workspace = tmp_path / "ws"
+    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(workspace))
+    plugin_dir = workspace / "plugins" / "headroom-opencode"
+    _write_opencode_plugin_entry(plugin_dir)
     env = build_opencode_install_env(port=5566, backend="ignored")
-    assert env == {}
+    assert env == {"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir)}
 
 
 def test_apply_and_revert_opencode_provider_scope(monkeypatch, tmp_path: Path) -> None:
@@ -865,12 +879,18 @@ def test_planner_opencode_in_provider_scope_targets() -> None:
     assert "opencode" in targets
 
 
-def test_planner_build_tool_envs_includes_opencode() -> None:
+def test_planner_build_tool_envs_includes_opencode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "ws"
+    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(workspace))
+    plugin_dir = workspace / "plugins" / "headroom-opencode"
+    _write_opencode_plugin_entry(plugin_dir)
     from headroom.install.planner import build_tool_envs
 
     envs = build_tool_envs(port=8787, backend="anthropic", targets=["opencode"])
     assert "opencode" in envs
-    assert envs["opencode"] == {}
+    assert envs["opencode"] == {"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir)}
 
 
 def test_planner_resolve_all_includes_opencode() -> None:
