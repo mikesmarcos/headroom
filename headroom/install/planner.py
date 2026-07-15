@@ -125,22 +125,13 @@ def build_manifest(
     telemetry_enabled: bool,
     image: str,
     no_http2: bool = False,
+    code_aware: bool | None = None,
+    intercept_tool_results: bool = False,
+    protect_tool_results: str | None = None,
+    bedrock_profile: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> DeploymentManifest:
-    """Create a normalized deployment manifest.
-
-    The persistent-install presets (service / task / Docker) are intentionally
-    loopback-only: the planner binds the proxy to ``127.0.0.1`` and emits
-    ``127.0.0.1`` as the manifest's client-reachable host, regardless of the
-    caller's ``HEADROOM_HOST``. This is asymmetric with wrap-time, where
-    :func:`headroom.providers.opencode.runtime.headroom_client_host` honors
-    ``HEADROOM_HOST`` so wrapped tools on remote hosts can still reach the
-    proxy. Persistent installs are scoped to a single host (the supervisor
-    process manages the proxy lifecycle on the same machine), so honoring
-    ``HEADROOM_HOST`` here would risk generating a baseURL no local tool
-    could reach. If a future preset needs a non-loopback host, the planner
-    should call :func:`headroom.providers.opencode.runtime.headroom_client_host`
-    rather than reintroduce the wildcard inline.
-    """
+    """Create a normalized deployment manifest."""
 
     normalized_profile = validate_profile_name(profile)
 
@@ -151,14 +142,11 @@ def build_manifest(
     else:
         supervisor_kind = SupervisorKind.NONE.value
 
-    # Persistent installs are loopback-only: see the docstring above.
-    persistent_host = "127.0.0.1"
-
     resolved_targets = resolve_targets(provider_mode, targets, scope=scope)
     tool_envs = build_tool_envs(port, backend, resolved_targets)
     base_env = {
         "HEADROOM_PORT": str(port),
-        "HEADROOM_HOST": persistent_host,
+        "HEADROOM_HOST": "127.0.0.1",
         "HEADROOM_MODE": proxy_mode,
         "HEADROOM_BACKEND": backend,
     }
@@ -171,10 +159,14 @@ def build_manifest(
     base_env["HEADROOM_TELEMETRY"] = "on" if telemetry_enabled else "off"
     if memory_enabled:
         base_env["HEADROOM_MEMORY_ENABLED"] = "1"
+    # Applied last so explicit --env overrides win over the auto-derived
+    # defaults above (e.g. a custom HEADROOM_WORKSPACE_DIR).
+    if extra_env:
+        base_env.update(extra_env)
 
     proxy_args = [
         "--host",
-        persistent_host,
+        "127.0.0.1",
         "--port",
         str(port),
         "--mode",
@@ -191,6 +183,14 @@ def build_manifest(
         proxy_args.extend(["--region", region])
     if no_http2:
         proxy_args.append("--no-http2")
+    if code_aware is not None:
+        proxy_args.append("--code-aware" if code_aware else "--no-code-aware")
+    if intercept_tool_results:
+        proxy_args.append("--intercept-tool-results")
+    if protect_tool_results:
+        proxy_args.extend(["--protect-tool-results", protect_tool_results])
+    if bedrock_profile:
+        proxy_args.extend(["--bedrock-profile", bedrock_profile])
 
     container_name = f"headroom-{normalized_profile}"
     return DeploymentManifest(
@@ -202,7 +202,7 @@ def build_manifest(
         provider_mode=provider_mode,
         targets=resolved_targets,
         port=port,
-        host=persistent_host,
+        host="127.0.0.1",
         backend=backend,
         anyllm_provider=anyllm_provider,
         region=region,
@@ -213,7 +213,7 @@ def build_manifest(
         image=image,
         service_name=f"headroom-{normalized_profile}",
         container_name=container_name,
-        health_url=f"http://{persistent_host}:{port}/readyz",
+        health_url=f"http://127.0.0.1:{port}/readyz",
         base_env=base_env,
         tool_envs=tool_envs,
         proxy_args=proxy_args,
