@@ -5644,6 +5644,25 @@ def zcode(
     )
 
 
+@unwrap.command("zcode")
+@click.option(
+    "--port", "-p", default=8787, type=click.IntRange(1, 65535), help="Proxy port (default: 8787)"
+)
+@click.option("--no-stop-proxy", is_flag=True, help="Do not stop the local Headroom proxy")
+def unwrap_zcode(port: int, no_stop_proxy: bool) -> None:
+    """Undo durable setup from ``headroom wrap zcode``."""
+    agents_md = Path.cwd() / "AGENTS.md"
+    if _remove_rtk_instructions(agents_md):
+        click.echo("  Removed Headroom rtk instructions from AGENTS.md.")
+        status = "cleaned"
+    else:
+        click.echo("  Nothing to undo: AGENTS.md has no Headroom wrap markers.")
+        status = "noop"
+
+    if not no_stop_proxy and status != "noop":
+        _echo_unwrap_proxy_stop_status(_stop_local_proxy_for_unwrap(port), port)
+
+
 # =============================================================================
 # Continue (VS Code / JetBrains extension)
 # =============================================================================
