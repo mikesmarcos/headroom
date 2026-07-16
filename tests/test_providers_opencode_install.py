@@ -54,6 +54,32 @@ def _write_plugin_entry(plugin_dir: Path, content: str = _PLUGIN_BODY) -> Path:
     return entry
 
 
+def _isolate_opencode_config_dir(monkeypatch: pytest.MonkeyPatch, home: Path) -> Path:
+    """Point OpenCode config resolution at ``home`` and clear explicit overrides."""
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    return home / ".config" / "opencode"
+
+
+def _install_opencode_for_provider_scope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Run the install-time OpenCode artifact prep and provider-scope config write."""
+    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(tmp_path / "ws"))
+    tarball = _plugin_tarball(tmp_path)
+    monkeypatch.setattr(
+        "headroom.providers.opencode.install._npm_pack_plugin",
+        lambda package_spec, *, pack_dir: tarball,
+    )
+
+    env = build_install_env(port=8787, backend="anthropic")
+    manifest = _manifest(port=8787)
+    manifest.tool_envs["opencode"] = {
+        "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": env["HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR"],
+    }
+    apply_provider_scope(manifest)
+
+
 def test_build_install_env_errors_when_package_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -200,11 +226,7 @@ def test_apply_provider_scope_includes_plugin_from_artifact_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope injects plugin path from tool_envs artifact dir."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
 
     # Create plugin artifact at a known location.
     plugin_dir = tmp_path / "managed" / "headroom-opencode"
@@ -234,11 +256,7 @@ def test_apply_provider_scope_includes_plugin_from_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope injects plugin path from os.environ artifact dir."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     # Create plugin artifact and set env var.
@@ -267,11 +285,7 @@ def test_apply_provider_scope_no_plugin_by_default(
     a plugin reference — even if a development checkout file happens to exist
     on disk (issue #17, acceptance criterion 2).
     """
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", raising=False)
 
@@ -294,11 +308,7 @@ def test_apply_provider_scope_preserves_existing_unrelated_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope preserves existing unrelated top-level keys."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     # Pre-populate config with unrelated keys.
@@ -337,11 +347,7 @@ def test_apply_provider_scope_preserves_existing_plugin_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope appends Headroom's artifact without removing user plugins."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
@@ -365,11 +371,7 @@ def test_apply_provider_scope_preserves_existing_string_plugin_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope preserves a user plugin encoded as a single string."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
@@ -393,11 +395,7 @@ def test_apply_provider_scope_raises_when_configured_artifact_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope fails clearly when the configured artifact is stale."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
     monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", str(tmp_path / "missing"))
 
@@ -409,11 +407,7 @@ def test_apply_provider_scope_creates_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope creates the opencode config with headroom provider."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
 
     manifest = _manifest(port=8787)
     mutation = apply_provider_scope(manifest)
@@ -435,15 +429,52 @@ def test_apply_provider_scope_creates_config(
     assert "environment" not in config["mcp"]["headroom"]
 
 
+def test_install_does_not_create_npm_state_in_empty_opencode_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installing OpenCode support leaves an empty config dir free of npm state."""
+    opencode_dir = _isolate_opencode_config_dir(monkeypatch, tmp_path)
+
+    _install_opencode_for_provider_scope(monkeypatch, tmp_path)
+
+    assert sorted(path.name for path in opencode_dir.iterdir()) == ["opencode.json"]
+    assert (opencode_dir / "opencode.json").is_file()
+    assert not any(opencode_dir.rglob("package.json"))
+    assert not any(opencode_dir.rglob("package-lock.json"))
+    assert not any(opencode_dir.rglob("node_modules"))
+
+
+def test_install_preserves_user_npm_state_in_opencode_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installing OpenCode support does not create or clobber config-dir npm state."""
+    opencode_dir = _isolate_opencode_config_dir(monkeypatch, tmp_path)
+    opencode_dir.mkdir(parents=True)
+    user_package = opencode_dir / "package.json"
+    user_package.write_text('{"private": true}\n', encoding="utf-8")
+    user_node_modules = opencode_dir / "node_modules"
+    user_node_modules.mkdir()
+    user_module_marker = user_node_modules / ".user-owned"
+    user_module_marker.write_text("keep\n", encoding="utf-8")
+
+    _install_opencode_for_provider_scope(monkeypatch, tmp_path)
+
+    assert sorted(path.name for path in opencode_dir.iterdir()) == [
+        "node_modules",
+        "opencode.json",
+        "package.json",
+    ]
+    assert (opencode_dir / "opencode.json").is_file()
+    assert user_package.read_text(encoding="utf-8") == '{"private": true}\n'
+    assert user_module_marker.read_text(encoding="utf-8") == "keep\n"
+    assert not (opencode_dir / "package-lock.json").exists()
+
+
 def test_apply_provider_scope_uses_manifest_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope uses the manifest's client-reachable host."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
 
     manifest = _manifest(port=8787, host="::1")
     apply_provider_scope(manifest)
@@ -461,11 +492,7 @@ def test_apply_provider_scope_non_default_port_consistency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Non-default port is reflected consistently in provider, MCP, and env."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
 
     manifest = _manifest(port=9999)
     apply_provider_scope(manifest)
@@ -497,11 +524,7 @@ def test_revert_provider_scope_restores_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """revert_provider_scope strips the Headroom block from the config."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -545,11 +568,7 @@ def test_apply_provider_scope_rejects_checkout_coupled_plugin_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope raises when tool_envs points at a checkout path."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     # Create a checkout-like path.
@@ -572,11 +591,7 @@ def test_apply_provider_scope_rejects_file_dependency_plugin_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope raises when tool_envs contains a file: dependency."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     manifest = _manifest(port=8787)
@@ -593,11 +608,7 @@ def test_apply_provider_scope_accepts_valid_managed_artifact_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """apply_provider_scope accepts a valid managed artifact path."""
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
     monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     # Create a managed artifact path (not a checkout).
