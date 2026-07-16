@@ -828,3 +828,129 @@ def test_build_opencode_config_content_does_not_autoload_development_checkout(
     assert "plugin" not in config, (
         "Default config must omit 'plugin' rather than injecting a dangling or repo-local path."
     )
+
+
+# ---------------------------------------------------------------------------
+# Checkout-coupled plugin rejection (issue #19)
+# ---------------------------------------------------------------------------
+
+
+def test_headroom_opencode_plugin_path_rejects_file_dependency() -> None:
+    """``HEADROOM_OPENCODE_PLUGIN_PATH`` containing ``file:`` is rejected."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    with pytest.raises(RuntimeError) as exc_info:
+        headroom_opencode_plugin_path(
+            env={"HEADROOM_OPENCODE_PLUGIN_PATH": "file:./plugins/opencode"}
+        )
+    assert "file:" in str(exc_info.value)
+
+
+def test_headroom_opencode_plugin_path_rejects_file_dependency_in_artifact_dir() -> None:
+    """``HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR`` containing ``file:`` is rejected."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    with pytest.raises(RuntimeError) as exc_info:
+        headroom_opencode_plugin_path(
+            env={"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": "file:./plugins/opencode"}
+        )
+    assert "file:" in str(exc_info.value)
+
+
+def test_headroom_opencode_plugin_path_rejects_checkout_path(tmp_path: Path) -> None:
+    """A path pointing at the repo checkout is rejected even when the file exists."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    checkout = tmp_path / "plugins" / "opencode" / "dist" / "entry.opencode.js"
+    checkout.parent.mkdir(parents=True)
+    checkout.write_text("export default () => {}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        headroom_opencode_plugin_path(env={"HEADROOM_OPENCODE_PLUGIN_PATH": str(checkout)})
+    msg = str(exc_info.value)
+    assert "checkout" in msg.lower()
+    assert "/plugins/opencode/dist/entry.opencode.js" in msg
+
+
+def test_headroom_opencode_plugin_path_rejects_checkout_path_via_artifact_dir(
+    tmp_path: Path,
+) -> None:
+    """``HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR`` pointing at the checkout is rejected."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    checkout = tmp_path / "plugins" / "opencode"
+    entry = checkout / "dist" / "entry.opencode.js"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("export default () => {}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        headroom_opencode_plugin_path(env={"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(checkout)})
+    msg = str(exc_info.value)
+    assert "checkout" in msg.lower()
+
+
+def test_headroom_opencode_plugin_path_rejects_symlink_to_checkout(
+    tmp_path: Path,
+) -> None:
+    """A symlink in the managed location that points to the checkout is rejected."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    # Set up a checkout-like path.
+    checkout = tmp_path / "checkout" / "plugins" / "opencode" / "dist" / "entry.opencode.js"
+    checkout.parent.mkdir(parents=True)
+    checkout.write_text("export default () => {}", encoding="utf-8")
+
+    # Managed location has a symlink to the checkout.
+    managed = tmp_path / "managed" / "headroom-opencode" / "dist" / "entry.opencode.js"
+    managed.parent.mkdir(parents=True)
+    managed.symlink_to(checkout)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        headroom_opencode_plugin_path(env={"HEADROOM_OPENCODE_PLUGIN_PATH": str(managed)})
+    msg = str(exc_info.value)
+    assert "checkout" in msg.lower()
+
+
+def test_headroom_opencode_plugin_path_allows_valid_managed_path(tmp_path: Path) -> None:
+    """A valid managed artifact path is not rejected."""
+    from headroom.providers.opencode.runtime import headroom_opencode_plugin_path
+
+    artifact = tmp_path / ".headroom" / "plugins" / "headroom-opencode"
+    entry = artifact / "dist" / "entry.opencode.js"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("export default () => {}", encoding="utf-8")
+
+    result = headroom_opencode_plugin_path(
+        env={"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(artifact)}
+    )
+    assert result == str(entry)
+
+
+def test_build_opencode_config_content_rejects_checkout_coupled_plugin_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``build_opencode_config_content`` rejects a plugin path at the repo checkout location."""
+    from headroom.providers.opencode.runtime import build_opencode_config_content
+
+    checkout = tmp_path / "plugins" / "opencode" / "dist" / "entry.opencode.js"
+    checkout.parent.mkdir(parents=True)
+    checkout.write_text("export default () => {}", encoding="utf-8")
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_PATH", str(checkout))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        build_opencode_config_content(port=8787, host="127.0.0.1")
+    msg = str(exc_info.value)
+    assert "checkout" in msg.lower()
+
+
+def test_build_opencode_config_content_rejects_file_dependency_plugin_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``build_opencode_config_content`` rejects a ``file:`` plugin path."""
+    from headroom.providers.opencode.runtime import build_opencode_config_content
+
+    monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_PATH", "file:./plugins/opencode")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        build_opencode_config_content(port=8787, host="127.0.0.1")
+    assert "file:" in str(exc_info.value)

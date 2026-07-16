@@ -15,15 +15,17 @@ from headroom import paths as _paths
 from headroom._subprocess import run
 from headroom.install.models import ConfigScope, DeploymentManifest, ManagedMutation, ToolTarget
 from headroom.install.paths import opencode_config_path
+from headroom.mcp_registry.install import DEFAULT_PROXY_URL
 
 from .config import (
     _inject_key_into_json,
     _parse_json_loose,
     headroom_provider_entry,
+    headroom_url_authority,
     snapshot_opencode_config_if_unwrapped,
     strip_opencode_headroom_blocks,
 )
-from .runtime import headroom_opencode_plugin_path
+from .runtime import headroom_opencode_plugin_path, proxy_base_url
 
 # Well-known plugin artifact contract. The package version is intentionally
 # explicit: operational installs must not resolve mutable npm tags like latest.
@@ -138,18 +140,24 @@ def build_install_env(*, port: int, backend: str) -> dict[str, str]:
     """Build the persistent install environment for OpenCode.
 
     Prepares the OpenCode transport plugin artifact at the managed
-    operational artifact location and returns an environment variable
-    pointing to it so the plugin can be loaded by OpenCode at runtime
-    without depending on the Headroom repository checkout.
+    operational artifact location and returns environment variables so the
+    plugin can be loaded by OpenCode at runtime without depending on the
+    Headroom repository checkout.
+
+    ``HEADROOM_PROXY_URL`` tells the transport plugin which proxy to route
+    all provider traffic through. The host is always ``127.0.0.1`` because
+    the persistent proxy binds to loopback.
 
     If the plugin artifact cannot be prepared (e.g. npm unavailable), raises
     an actionable error instead of silently falling back to a missing native
     plugin.
     """
     del backend
-    del port
     artifact_dir = prepare_opencode_plugin_artifact()
-    return {"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(artifact_dir)}
+    return {
+        "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(artifact_dir),
+        "HEADROOM_PROXY_URL": f"http://127.0.0.1:{port}",
+    }
 
 
 def apply_provider_scope(manifest: DeploymentManifest) -> ManagedMutation | None:
@@ -170,8 +178,30 @@ def apply_provider_scope(manifest: DeploymentManifest) -> ManagedMutation | None
     else:
         data = {}
 
-    provider = {"headroom": headroom_provider_entry(manifest.port, host=manifest.host)}
+    # Build proxy URL references (issue #18).
+    authority = headroom_url_authority(manifest.host)
+    base_url = proxy_base_url(manifest.port, manifest.host)
+    proxy_url = f"http://{authority}:{manifest.port}"
+
+    # Inject all three provider baseURL routes: keep native provider identity
+    # (model metadata, API keys) while routing all traffic through the proxy.
+    provider = {
+        "anthropic": {"options": {"baseURL": base_url}},
+        "openai": {"options": {"baseURL": base_url}},
+        "headroom": headroom_provider_entry(manifest.port, host=manifest.host),
+    }
     data = _inject_key_into_json(data, "provider", provider)
+
+    # Inject MCP server config (issue #18). Use HEADROOM_PROXY_URL for
+    # non-default proxy URLs so the MCP server reaches the correct proxy.
+    mcp_entry: dict[str, object] = {
+        "type": "local",
+        "command": ["headroom", "mcp", "serve"],
+        "enabled": True,
+    }
+    if proxy_url != DEFAULT_PROXY_URL:
+        mcp_entry["environment"] = {"HEADROOM_PROXY_URL": proxy_url}
+    data = _inject_key_into_json(data, "mcp", {"headroom": mcp_entry})
 
     # Inject plugin reference from managed operational artifact (issue #17).
     tool_env = manifest.tool_envs.get(ToolTarget.OPENCODE.value, {})

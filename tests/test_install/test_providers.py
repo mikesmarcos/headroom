@@ -563,7 +563,10 @@ def test_opencode_build_install_env_sets_plugin_artifact_dir(
     plugin_dir = workspace / "plugins" / "headroom-opencode"
     _write_opencode_plugin_entry(plugin_dir)
     env = build_opencode_install_env(port=5566, backend="ignored")
-    assert env == {"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir)}
+    assert env == {
+        "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir),
+        "HEADROOM_PROXY_URL": "http://127.0.0.1:5566",
+    }
 
 
 def test_apply_and_revert_opencode_provider_scope(monkeypatch, tmp_path: Path) -> None:
@@ -890,7 +893,10 @@ def test_planner_build_tool_envs_includes_opencode(
 
     envs = build_tool_envs(port=8787, backend="anthropic", targets=["opencode"])
     assert "opencode" in envs
-    assert envs["opencode"] == {"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir)}
+    assert envs["opencode"] == {
+        "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir),
+        "HEADROOM_PROXY_URL": "http://127.0.0.1:8787",
+    }
 
 
 def test_planner_resolve_all_includes_opencode() -> None:

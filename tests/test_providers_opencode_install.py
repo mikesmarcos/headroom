@@ -99,6 +99,20 @@ def test_build_install_env_sets_artifact_dir(
     assert env["HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR"] == str(plugin_dir)
 
 
+def test_build_install_env_sets_proxy_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """build_install_env sets HEADROOM_PROXY_URL using the provided port."""
+    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(tmp_path / "ws"))
+    monkeypatch.setattr(
+        "headroom.providers.opencode.install.prepare_opencode_plugin_artifact",
+        lambda **kwargs: tmp_path / "plugin",
+    )
+    env = build_install_env(port=8787, backend="anthropic")
+    assert env["HEADROOM_PROXY_URL"] == "http://127.0.0.1:8787"
+
+    env = build_install_env(port=9999, backend="anthropic")
+    assert env["HEADROOM_PROXY_URL"] == "http://127.0.0.1:9999"
+
+
 # ---------------------------------------------------------------------------
 # prepare_opencode_plugin_artifact
 # ---------------------------------------------------------------------------
@@ -410,9 +424,15 @@ def test_apply_provider_scope_creates_config(
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     assert config_file.exists()
     config = json.loads(config_file.read_text())
+    # All three provider routes point at the proxy (issue #18).
     assert config["provider"]["headroom"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
     assert "models" in config["provider"]["headroom"]
-    assert "mcp" not in config
+    assert config["provider"]["anthropic"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+    assert config["provider"]["openai"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+    # MCP config is injected (issue #18). Default port 8787 → no HEADROOM_PROXY_URL.
+    assert "mcp" in config
+    assert config["mcp"]["headroom"]["command"] == ["headroom", "mcp", "serve"]
+    assert "environment" not in config["mcp"]["headroom"]
 
 
 def test_apply_provider_scope_uses_manifest_host(
@@ -430,7 +450,37 @@ def test_apply_provider_scope_uses_manifest_host(
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config = json.loads(config_file.read_text())
+    # All providers use the IPv6 host.
     assert config["provider"]["headroom"]["options"]["baseURL"] == "http://[::1]:8787/v1"
+    assert config["provider"]["anthropic"]["options"]["baseURL"] == "http://[::1]:8787/v1"
+    assert config["provider"]["openai"]["options"]["baseURL"] == "http://[::1]:8787/v1"
+    assert config["mcp"]["headroom"]["environment"] == {"HEADROOM_PROXY_URL": "http://[::1]:8787"}
+
+
+def test_apply_provider_scope_non_default_port_consistency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-default port is reflected consistently in provider, MCP, and env."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+
+    manifest = _manifest(port=9999)
+    apply_provider_scope(manifest)
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config = json.loads(config_file.read_text())
+    # Provider baseURLs reflect the non-default port.
+    assert config["provider"]["headroom"]["options"]["baseURL"] == "http://127.0.0.1:9999/v1"
+    assert config["provider"]["anthropic"]["options"]["baseURL"] == "http://127.0.0.1:9999/v1"
+    assert config["provider"]["openai"]["options"]["baseURL"] == "http://127.0.0.1:9999/v1"
+    # MCP config includes HEADROOM_PROXY_URL for non-default port.
+    assert config["mcp"]["headroom"]["environment"] == {
+        "HEADROOM_PROXY_URL": "http://127.0.0.1:9999"
+    }
+    assert config["mcp"]["headroom"]["command"] == ["headroom", "mcp", "serve"]
 
 
 def test_apply_provider_scope_skips_when_scope_is_not_provider(
@@ -484,3 +534,86 @@ def test_revert_provider_scope_noop_when_file_missing(
     manifest = _manifest()
     revert_provider_scope(mutation, manifest)
     # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# Checkout-coupled plugin rejection safeguards (issue #19)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_provider_scope_rejects_checkout_coupled_plugin_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope raises when tool_envs points at a checkout path."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+
+    # Create a checkout-like path.
+    checkout_path = tmp_path / "repo" / "plugins" / "opencode" / "dist" / "entry.opencode.js"
+    checkout_path.parent.mkdir(parents=True)
+    checkout_path.write_text("export default () => {}", encoding="utf-8")
+
+    manifest = _manifest(port=8787)
+    manifest.tool_envs["opencode"] = {
+        "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(checkout_path.parent.parent),
+    }
+
+    with pytest.raises(RuntimeError) as exc_info:
+        apply_provider_scope(manifest)
+    msg = str(exc_info.value)
+    assert "checkout" in msg.lower()
+
+
+def test_apply_provider_scope_rejects_file_dependency_plugin_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope raises when tool_envs contains a file: dependency."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+
+    manifest = _manifest(port=8787)
+    manifest.tool_envs["opencode"] = {
+        "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": "file:./plugins/opencode",
+    }
+
+    with pytest.raises(RuntimeError) as exc_info:
+        apply_provider_scope(manifest)
+    assert "file:" in str(exc_info.value)
+
+
+def test_apply_provider_scope_accepts_valid_managed_artifact_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_provider_scope accepts a valid managed artifact path."""
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+
+    # Create a managed artifact path (not a checkout).
+    artifact_dir = tmp_path / ".headroom" / "plugins" / "headroom-opencode"
+    plugin_entry = artifact_dir / "dist" / "entry.opencode.js"
+    plugin_entry.parent.mkdir(parents=True)
+    plugin_entry.write_text("export default () => {}", encoding="utf-8")
+
+    manifest = _manifest(port=8787)
+    manifest.tool_envs["opencode"] = {
+        "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(artifact_dir),
+    }
+
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config = json.loads(config_file.read_text())
+    assert config["plugin"] == [str(plugin_entry)]
