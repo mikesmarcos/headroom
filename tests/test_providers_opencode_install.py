@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from headroom.install.models import ConfigScope, DeploymentManifest
+from headroom.providers.opencode.config import snapshot_opencode_config_if_unwrapped
 from headroom.providers.opencode.install import (
     apply_provider_scope,
     build_install_env,
@@ -55,11 +56,13 @@ def _write_plugin_entry(plugin_dir: Path, content: str = _PLUGIN_BODY) -> Path:
 
 
 def _isolate_opencode_config_dir(monkeypatch: pytest.MonkeyPatch, home: Path) -> Path:
-    """Point OpenCode config resolution at ``home`` and clear explicit overrides."""
+    """Point OpenCode config resolution at ``home`` and clear plugin/config overrides."""
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("OPENCODE_HOME", raising=False)
     monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", raising=False)
     return home / ".config" / "opencode"
 
 
@@ -257,7 +260,6 @@ def test_apply_provider_scope_includes_plugin_from_env(
 ) -> None:
     """apply_provider_scope injects plugin path from os.environ artifact dir."""
     _isolate_opencode_config_dir(monkeypatch, tmp_path)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     # Create plugin artifact and set env var.
     plugin_dir = tmp_path / "env-managed" / "headroom-opencode"
@@ -286,8 +288,6 @@ def test_apply_provider_scope_no_plugin_by_default(
     on disk (issue #17, acceptance criterion 2).
     """
     _isolate_opencode_config_dir(monkeypatch, tmp_path)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", raising=False)
 
     # Even if a checkout-like file exists on disk, it is not auto-discovered.
     checkout_path = tmp_path / "plugins" / "opencode" / "dist" / "entry.opencode.js"
@@ -309,7 +309,6 @@ def test_apply_provider_scope_preserves_existing_unrelated_config(
 ) -> None:
     """apply_provider_scope preserves existing unrelated top-level keys."""
     _isolate_opencode_config_dir(monkeypatch, tmp_path)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     # Pre-populate config with unrelated keys.
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
@@ -348,7 +347,6 @@ def test_apply_provider_scope_preserves_existing_plugin_entries(
 ) -> None:
     """apply_provider_scope appends Headroom's artifact without removing user plugins."""
     _isolate_opencode_config_dir(monkeypatch, tmp_path)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -372,7 +370,6 @@ def test_apply_provider_scope_preserves_existing_string_plugin_entry(
 ) -> None:
     """apply_provider_scope preserves a user plugin encoded as a single string."""
     _isolate_opencode_config_dir(monkeypatch, tmp_path)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -396,7 +393,6 @@ def test_apply_provider_scope_raises_when_configured_artifact_is_missing(
 ) -> None:
     """apply_provider_scope fails clearly when the configured artifact is stale."""
     _isolate_opencode_config_dir(monkeypatch, tmp_path)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
     monkeypatch.setenv("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", str(tmp_path / "missing"))
 
     with pytest.raises(RuntimeError, match="HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR"):
@@ -560,6 +556,101 @@ def test_revert_provider_scope_noop_when_file_missing(
 
 
 # ---------------------------------------------------------------------------
+# Snapshot and byte-for-byte backup/restore contract
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_backup_is_byte_for_byte(tmp_path: Path) -> None:
+    """snapshot copies bytes without normalizing line endings."""
+    config_file = tmp_path / "opencode.json"
+    # Content with Windows-style line endings to test raw-byte preservation.
+    original_bytes = b'{"model": "test"}\r\n'
+    config_file.write_bytes(original_bytes)
+    backup_file = config_file.with_suffix(".json.headroom-backup")
+
+    snapshot_opencode_config_if_unwrapped(config_file, backup_file)
+    assert backup_file.exists()
+    # shutil.copy2 preserves raw bytes, including \r\n.
+    assert backup_file.read_bytes() == original_bytes
+
+
+def test_snapshot_noop_when_config_missing(tmp_path: Path) -> None:
+    """snapshot is a no-op when the config file does not exist."""
+    config_file = tmp_path / "opencode.json"
+    backup_file = config_file.with_suffix(".json.headroom-backup")
+
+    snapshot_opencode_config_if_unwrapped(config_file, backup_file)
+    assert not backup_file.exists()
+
+
+def test_apply_revert_restores_byte_for_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Apply->revert restores the original config byte-for-byte.
+
+    Verifies the apply->revert byte-for-byte restore contract:
+    - ``apply_provider_scope`` snapshots the original before mutation.
+    - The backup matches the original byte-for-byte.
+    - Backup content contains no Headroom wiring.
+    - ``revert_provider_scope`` restores from the backup.
+    - The backup is cleaned up after revert.
+    - The restored config no longer contains Headroom-managed plugin,
+      provider, or MCP wiring.
+    """
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
+
+    # Pre-existing user config.
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        json.dumps({"model": "openai/gpt-4o", "custom": True, "plugin": ["user-tool"]}, indent=2)
+        + "\n"
+    )
+    original_bytes = original.encode("utf-8")
+    config_file.write_bytes(original_bytes)
+
+    plugin_dir = tmp_path / ".headroom" / "plugins" / "headroom-opencode"
+    plugin_entry = plugin_dir / "dist" / "entry.opencode.js"
+    plugin_entry.parent.mkdir(parents=True)
+    plugin_entry.write_text("export default () => {}", encoding="utf-8")
+
+    manifest = _manifest(port=8787)
+    manifest.tool_envs["opencode"] = {
+        "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir),
+    }
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+
+    # Backup was created from the original, before mutation.
+    backup_file = config_file.with_suffix(".json.headroom-backup")
+    assert backup_file.exists()
+    assert backup_file.read_bytes() == original_bytes
+    assert "headroom" not in json.loads(backup_file.read_text(encoding="utf-8"))
+
+    # Active config now has Headroom wiring.
+    active = json.loads(config_file.read_text(encoding="utf-8"))
+    assert "headroom" in active.get("provider", {})
+    assert "headroom" in active.get("mcp", {})
+    assert str(plugin_entry) in active.get("plugin", [])
+
+    # Revert — should restore from backup.
+    revert_provider_scope(mutation, manifest)
+
+    # File restored byte-for-byte.
+    assert config_file.read_bytes() == original_bytes
+
+    # Backup cleaned up.
+    assert not backup_file.exists()
+
+    # No Headroom-managed wiring remains.
+    restored = json.loads(config_file.read_text(encoding="utf-8"))
+    assert "headroom" not in restored.get("provider", {})
+    assert "headroom" not in restored.get("mcp", {})
+    # Original user plugin entry is preserved.
+    assert restored.get("plugin") == ["user-tool"]
+
+
+# ---------------------------------------------------------------------------
 # Checkout-coupled plugin rejection safeguards (issue #19)
 # ---------------------------------------------------------------------------
 
@@ -569,7 +660,6 @@ def test_apply_provider_scope_rejects_checkout_coupled_plugin_path(
 ) -> None:
     """apply_provider_scope raises when tool_envs points at a checkout path."""
     _isolate_opencode_config_dir(monkeypatch, tmp_path)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     # Create a checkout-like path.
     checkout_path = tmp_path / "repo" / "plugins" / "opencode" / "dist" / "entry.opencode.js"
@@ -592,7 +682,6 @@ def test_apply_provider_scope_rejects_file_dependency_plugin_path(
 ) -> None:
     """apply_provider_scope raises when tool_envs contains a file: dependency."""
     _isolate_opencode_config_dir(monkeypatch, tmp_path)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     manifest = _manifest(port=8787)
     manifest.tool_envs["opencode"] = {
@@ -609,7 +698,6 @@ def test_apply_provider_scope_accepts_valid_managed_artifact_path(
 ) -> None:
     """apply_provider_scope accepts a valid managed artifact path."""
     _isolate_opencode_config_dir(monkeypatch, tmp_path)
-    monkeypatch.delenv("HEADROOM_OPENCODE_PLUGIN_PATH", raising=False)
 
     # Create a managed artifact path (not a checkout).
     artifact_dir = tmp_path / ".headroom" / "plugins" / "headroom-opencode"
