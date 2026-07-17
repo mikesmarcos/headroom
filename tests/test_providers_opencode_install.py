@@ -516,6 +516,23 @@ def test_apply_provider_scope_skips_when_scope_is_not_provider(
     assert result is None
 
 
+def test_apply_provider_scope_preserves_malformed_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persistent install must not replace config it cannot parse safely."""
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    malformed = b'{"provider": {"custom": },}\r\n'
+    config_file.write_bytes(malformed)
+
+    mutation = apply_provider_scope(_manifest())
+
+    assert mutation is None
+    assert config_file.read_bytes() == malformed
+    assert not config_file.with_suffix(".json.headroom-backup").exists()
+
+
 def test_revert_provider_scope_restores_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -553,6 +570,118 @@ def test_revert_provider_scope_noop_when_file_missing(
     manifest = _manifest()
     revert_provider_scope(mutation, manifest)
     # Should not raise
+
+
+def test_apply_delete_backup_revert_preserves_nested_user_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production lifecycle deep-applies and reverses its recorded delta."""
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    original = {
+        "model": "anthropic/opus",
+        "permission": {"edit": "ask"},
+        "provider": {
+            "anthropic": {
+                "options": {"apiKey": "anthropic-key", "timeout": 45},
+                "models": {"opus": {"name": "User Opus", "limit": {"output": 8192}}},
+            },
+            "openai": {
+                "options": {"apiKey": "openai-key", "organization": "user-org"},
+                "models": {"gpt-user": {"name": "User GPT"}},
+            },
+            "custom": {"npm": "custom-provider"},
+        },
+        "mcp": {"user": {"type": "local", "command": ["user-mcp"]}},
+        "plugin": ["user-plugin"],
+    }
+    config_file.write_text(json.dumps(original), encoding="utf-8")
+    plugin_dir = tmp_path / "managed" / "headroom-opencode"
+    plugin_entry = _write_plugin_entry(plugin_dir)
+    manifest = _manifest()
+    manifest.tool_envs["opencode"] = {"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir)}
+
+    mutation = apply_provider_scope(manifest)
+
+    assert mutation is not None
+    assert json.loads(json.dumps(mutation.data)) == mutation.data
+    applied = json.loads(config_file.read_text(encoding="utf-8"))
+    assert applied["provider"]["anthropic"]["options"] == {
+        "apiKey": "anthropic-key",
+        "timeout": 45,
+        "baseURL": "http://127.0.0.1:8787/v1",
+    }
+    assert applied["provider"]["anthropic"]["models"] == original["provider"]["anthropic"]["models"]
+    assert applied["provider"]["openai"]["options"]["apiKey"] == "openai-key"
+    assert applied["plugin"] == ["user-plugin", str(plugin_entry)]
+
+    config_file.with_suffix(".json.headroom-backup").unlink()
+    revert_provider_scope(mutation, manifest)
+
+    assert json.loads(config_file.read_text(encoding="utf-8")) == original
+
+
+def test_revert_provider_scope_preserves_values_changed_after_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(json.dumps({"plugin": ["user-plugin"]}), encoding="utf-8")
+    plugin_dir = tmp_path / "managed" / "headroom-opencode"
+    _write_plugin_entry(plugin_dir)
+    manifest = _manifest()
+    manifest.tool_envs["opencode"] = {"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir)}
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    config_file.with_suffix(".json.headroom-backup").unlink()
+
+    current = json.loads(config_file.read_text(encoding="utf-8"))
+    current["provider"]["anthropic"]["options"]["baseURL"] = "https://user.example/v1"
+    current["mcp"]["headroom"]["command"] = ["user-replaced-command"]
+    current["plugin"].append("later-plugin")
+    config_file.write_text(json.dumps(current), encoding="utf-8")
+
+    revert_provider_scope(mutation, manifest)
+
+    restored = json.loads(config_file.read_text(encoding="utf-8"))
+    assert restored["provider"] == {
+        "anthropic": {"options": {"baseURL": "https://user.example/v1"}}
+    }
+    assert restored["mcp"] == {
+        "headroom": {
+            "command": ["user-replaced-command"],
+        }
+    }
+    assert restored["plugin"] == ["user-plugin", "later-plugin"]
+
+
+def test_revert_provider_scope_legacy_empty_delta_uses_exact_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Old manifests get a separate false-negative-safe exact-value fallback."""
+    _isolate_opencode_config_dir(monkeypatch, tmp_path)
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    original = {
+        "provider": {"anthropic": {"options": {"apiKey": "keep"}}},
+        "mcp": {"user": {"command": ["keep"]}},
+        "plugin": ["user-plugin"],
+    }
+    config_file.write_text(json.dumps(original), encoding="utf-8")
+    plugin_dir = tmp_path / "managed" / "headroom-opencode"
+    _write_plugin_entry(plugin_dir)
+    manifest = _manifest()
+    manifest.tool_envs["opencode"] = {"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": str(plugin_dir)}
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    config_file.with_suffix(".json.headroom-backup").unlink()
+    mutation.data = {}
+
+    revert_provider_scope(mutation, manifest)
+
+    assert json.loads(config_file.read_text(encoding="utf-8")) == original
 
 
 # ---------------------------------------------------------------------------

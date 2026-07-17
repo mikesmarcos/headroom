@@ -126,14 +126,15 @@ from headroom.providers.openclaw import (
 )
 from headroom.providers.opencode import build_launch_env as _build_opencode_launch_env
 from headroom.providers.opencode.config import (
-    _MCP_MARKER_END,  # noqa: F401
-    _MCP_MARKER_START,
-    _PROVIDER_MARKER_END,  # noqa: F401
-    _PROVIDER_MARKER_START,
+    ConfigFileAction,
+    cleanup_opencode_wrap_content,
     inject_opencode_provider_config,
     opencode_config_paths,
+    render_opencode_config,
     snapshot_opencode_config_if_unwrapped,
-    strip_opencode_headroom_blocks,
+)
+from headroom.providers.opencode.runtime import (
+    build_opencode_config_content as _build_opencode_config_content,
 )
 from headroom.providers.opencode.runtime import (
     headroom_client_host as _headroom_opencode_client_host,
@@ -6562,18 +6563,35 @@ def unwrap_opencode(port: int, no_stop_proxy: bool) -> None:
             ) from exc
     elif config_file.exists():
         content = _read_text(config_file)
-        if _PROVIDER_MARKER_START in content or _MCP_MARKER_START in content:
-            cleaned = strip_opencode_headroom_blocks(content)
-            if cleaned.strip():
-                _write_text(config_file, cleaned + "\n")
-                click.echo(f"  Removed Headroom block from {config_file}; other content preserved.")
-                status = "cleaned"
-            else:
-                config_file.unlink()
-                click.echo(f"  Removed {config_file} (contained only Headroom-written config).")
-                status = "removed"
+        try:
+            canonical_overlay = _build_opencode_config_content(
+                port=port,
+                host=_headroom_opencode_client_host(),
+                env=os.environ,
+            )
+        except RuntimeError:
+            # A stale/missing optional plugin artifact must not prevent the
+            # independent provider and MCP cleanup.  Without a verified
+            # artifact path we deliberately leave plugin entries untouched;
+            # suffixes and the presence of other Headroom wiring are not
+            # proof of plugin ownership.
+            canonical_overlay = _build_opencode_config_content(
+                port=port,
+                host=_headroom_opencode_client_host(),
+                env=os.environ,
+                include_plugin=False,
+            )
+        cleaned = cleanup_opencode_wrap_content(content, canonical_overlay)
+        if cleaned.action is ConfigFileAction.WRITE and cleaned.config is not None:
+            _write_text(config_file, render_opencode_config(cleaned.config))
+            click.echo(f"  Removed Headroom wiring from {config_file}; other content preserved.")
+            status = "cleaned"
+        elif cleaned.action is ConfigFileAction.DELETE:
+            config_file.unlink()
+            click.echo(f"  Removed {config_file} (contained only Headroom-written config).")
+            status = "removed"
         else:
-            click.echo(f"  Nothing to undo: {config_file} has no Headroom wrap markers.")
+            click.echo(f"  Nothing to undo: {config_file} has no Headroom wiring.")
             status = "noop"
     else:
         click.echo(f"  Nothing to undo: {config_file} does not exist.")
@@ -6581,12 +6599,14 @@ def unwrap_opencode(port: int, no_stop_proxy: bool) -> None:
 
     # Remove Serena MCP if it was installed by Headroom.
     # Also remove the headroom MCP server itself.
-    from headroom.mcp_registry import OpencodeRegistrar
+    from headroom.mcp_registry import OpencodeRegistrar, build_headroom_spec
 
     opencode_registrar = OpencodeRegistrar()
-    if opencode_registrar.detect():
-        if opencode_registrar.unregister_server("headroom"):
-            click.echo("  Removed Headroom MCP server from OpenCode.")
+    if status != "restored" and opencode_registrar.detect():
+        expected_headroom = build_headroom_spec(f"http://127.0.0.1:{port}")
+        if opencode_registrar.get_server("headroom") == expected_headroom:
+            if opencode_registrar.unregister_server("headroom"):
+                click.echo("  Removed Headroom MCP server from OpenCode.")
         serena_status = _remove_headroom_installed_serena_mcp(opencode_registrar)
         if serena_status == "removed":
             click.echo("  Removed Headroom-installed Serena MCP server from OpenCode.")

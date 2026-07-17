@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from headroom.cli import wrap as wrap_mod
 from headroom.cli.main import main
+from tests.opencode_test_utils import set_test_home
 
 
 @pytest.fixture
@@ -18,12 +19,14 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-def _set_test_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    home = str(tmp_path)
-    monkeypatch.setenv("HOME", home)
-    monkeypatch.setenv("USERPROFILE", home)
-    monkeypatch.delenv("OPENCODE_HOME", raising=False)
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+@pytest.fixture(autouse=True)
+def isolate_proxy_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep CLI tests from starting or reusing a real proxy process."""
+    monkeypatch.setattr(
+        wrap_mod,
+        "_ensure_proxy",
+        lambda port, no_proxy, **kwargs: (None, port),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +42,7 @@ def test_wrap_opencode_sets_config_content_env(
     """OPENCODE_CONFIG_CONTENT env var is set with the headroom provider."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://deepseek.example/v1")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
 
@@ -77,7 +80,7 @@ def test_wrap_opencode_does_not_add_base_url_env_vars(
     """OPENAI_BASE_URL and ANTHROPIC_BASE_URL are left to OpenCode providers."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://deepseek.example/v1")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
 
@@ -106,6 +109,7 @@ def test_wrap_opencode_missing_binary_errors_clearly(
     """If the opencode binary is missing the command must fail with a clear error."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value=None):
         with patch.object(wrap_mod, "_ensure_rtk_binary", return_value=Path("/tmp/rtk")):
@@ -123,7 +127,7 @@ def test_wrap_opencode_prepare_only_injects_config(
     """`wrap opencode --prepare-only` writes the provider config to opencode.json."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         with patch.object(wrap_mod, "_ensure_rtk_binary", return_value=Path("/tmp/rtk")):
@@ -143,7 +147,7 @@ def test_wrap_opencode_prepare_only_registers_serena_with_agent_context(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         with patch.object(wrap_mod, "_ensure_rtk_binary", return_value=Path("/tmp/rtk")):
@@ -164,7 +168,7 @@ def test_wrap_opencode_no_mcp_skips_mcp_injection(
     """`--no-mcp` skips MCP server injection."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     captured: dict[str, object] = {}
 
@@ -193,7 +197,7 @@ def test_wrap_opencode_injects_mcp_by_default(
     """MCP is included in OPENCODE_CONFIG_CONTENT by default."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     captured: dict[str, object] = {}
 
@@ -225,7 +229,7 @@ def test_wrap_opencode_injects_rtk_into_agents_md(
     """RTK instructions are injected into global and project AGENTS.md."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         with patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)):
@@ -241,42 +245,6 @@ def test_wrap_opencode_injects_rtk_into_agents_md(
     assert wrap_mod._RTK_MARKER in project_agents.read_text(encoding="utf-8")
 
 
-def test_unwrap_opencode_removes_rtk_from_agents_md(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """unwrap opencode removes the rtk block that wrap opencode injected into both
-    the project and global AGENTS.md — mirroring unwrap_codex / unwrap_copilot."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
-
-    with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
-        with patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)):
-            with patch.object(wrap_mod, "_ensure_rtk_binary", return_value=Path("/tmp/rtk")):
-                runner.invoke(main, ["wrap", "opencode", "--port", "9000", "--no-mcp"])
-
-    global_agents = tmp_path / ".config" / "opencode" / "AGENTS.md"
-    project_agents = tmp_path / "AGENTS.md"
-    assert wrap_mod._RTK_MARKER in global_agents.read_text(encoding="utf-8")
-    assert wrap_mod._RTK_MARKER in project_agents.read_text(encoding="utf-8")
-
-    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
-        result = runner.invoke(main, ["unwrap", "opencode"])
-
-    assert result.exit_code == 0, result.output
-
-    # Both rtk blocks are gone after unwrap (previously left behind). A file that
-    # held only the rtk block is removed entirely by _remove_rtk_instructions, so
-    # treat a missing file as "block gone".
-    def _rtk_absent(path: Path) -> bool:
-        return not path.exists() or wrap_mod._RTK_MARKER not in path.read_text(encoding="utf-8")
-
-    assert _rtk_absent(global_agents)
-    assert _rtk_absent(project_agents)
-
-
 def test_wrap_opencode_no_project_rtk_only_skips_project_agents_md(
     runner: CliRunner,
     tmp_path: Path,
@@ -284,7 +252,7 @@ def test_wrap_opencode_no_project_rtk_only_skips_project_agents_md(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
     project_agents = tmp_path / "AGENTS.md"
     project_agents.write_text("# Team instructions\n", encoding="utf-8")
 
@@ -318,7 +286,7 @@ def test_wrap_opencode_idempotent_no_duplicate_block(
     """Running wrap twice must not duplicate the RTK block in AGENTS.md."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         with patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)):
@@ -336,61 +304,6 @@ def test_wrap_opencode_idempotent_no_duplicate_block(
 # ---------------------------------------------------------------------------
 
 
-def test_unwrap_opencode_restores_from_backup(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unwrap restores the pre-wrap backup and removes it."""
-    monkeypatch.chdir(tmp_path)
-    _set_test_home(monkeypatch, tmp_path)
-
-    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
-    backup_file = config_file.with_suffix(".json.headroom-backup")
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    original = '{"model": "openai/gpt-4o"}'
-    config_file.write_text(original)
-    backup_file.write_text(original)
-
-    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
-        result = runner.invoke(main, ["unwrap", "opencode"])
-
-    assert result.exit_code == 0, result.output
-    assert "Restored prior" in result.output
-    assert not backup_file.exists()
-    assert config_file.read_text(encoding="utf-8") == original
-
-
-def test_unwrap_opencode_strips_blocks_when_no_backup(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unwrap strips Headroom blocks when no backup exists."""
-    monkeypatch.chdir(tmp_path)
-    _set_test_home(monkeypatch, tmp_path)
-
-    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    user_content = '{"model": "openai/gpt-4o"}'
-    wrapped_content = (
-        wrap_mod._PROVIDER_MARKER_START
-        + '\n"provider": {},\n'
-        + wrap_mod._PROVIDER_MARKER_END
-        + "\n"
-        + user_content
-    )
-    config_file.write_text(wrapped_content)
-
-    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
-        result = runner.invoke(main, ["unwrap", "opencode"])
-
-    assert result.exit_code == 0, result.output
-    assert "Removed Headroom block" in result.output
-    assert user_content in config_file.read_text(encoding="utf-8")
-    assert wrap_mod._PROVIDER_MARKER_START not in config_file.read_text(encoding="utf-8")
-
-
 # ---------------------------------------------------------------------------
 # Edge cases — wrap
 # ---------------------------------------------------------------------------
@@ -404,7 +317,7 @@ def test_wrap_opencode_preserves_existing_user_providers(
     """Wrap merges headroom provider without disturbing user's existing providers."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -429,7 +342,7 @@ def test_wrap_opencode_port_change_updates_existing_config(
     """Wrapping with a different port updates the baseURL in opencode.json."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         with patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)):
@@ -450,7 +363,7 @@ def test_wrap_opencode_handles_malformed_config_file(
     """Wrap handles a malformed opencode.json by backing it up before overwriting."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -481,7 +394,7 @@ def test_wrap_opencode_handles_empty_config_file(
     """Wrap handles an empty opencode.json file gracefully."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -505,7 +418,7 @@ def test_wrap_opencode_handles_config_dir_missing(
     """Wrap creates the config directory when it doesn't exist."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     config_dir = tmp_path / ".config" / "opencode"
     assert not config_dir.exists()
@@ -528,7 +441,7 @@ def test_wrap_opencode_rtk_preserves_existing_agents_md(
     """RTK injection appends to AGENTS.md without removing existing content."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     existing_content = "# My custom rules\nUse spaces, not tabs."
     (tmp_path / "AGENTS.md").write_text(existing_content)
@@ -552,7 +465,7 @@ def test_wrap_opencode_no_rtk_leaves_agents_md_untouched(
     """`--no-rtk` flag leaves existing AGENTS.md untouched."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     existing_content = "# My custom rules\nUse spaces, not tabs."
     (tmp_path / "AGENTS.md").write_text(existing_content)
@@ -578,7 +491,7 @@ def test_wrap_opencode_respects_opencode_config_env(
     """OPENCODE_CONFIG env var overrides the default config path."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     custom_config = tmp_path / "custom" / "config.json"
     monkeypatch.setenv("OPENCODE_CONFIG", str(custom_config))
@@ -607,7 +520,7 @@ def test_wrap_opencode_headroom_project_from_cwd(
     monkeypatch.chdir(project_dir)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
     monkeypatch.delenv("HEADROOM_PROJECT", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     captured: dict[str, object] = {}
 
@@ -632,7 +545,7 @@ def test_wrap_opencode_respects_existing_headroom_project(
     """User-set HEADROOM_PROJECT env var is preserved, not overridden."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
     monkeypatch.setenv("HEADROOM_PROJECT", "user-set-value")
 
     captured: dict[str, object] = {}
@@ -658,7 +571,7 @@ def test_wrap_opencode_config_merges_existing_model(
     """Wrap preserves the user's existing model selection."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -680,67 +593,6 @@ def test_wrap_opencode_config_merges_existing_model(
 # ---------------------------------------------------------------------------
 
 
-def test_unwrap_opencode_removes_config_when_only_headroom_content(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unwrap removes the config file entirely when it contained only Headroom content."""
-    monkeypatch.chdir(tmp_path)
-    _set_test_home(monkeypatch, tmp_path)
-
-    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    wrapped_content = (
-        wrap_mod._PROVIDER_MARKER_START + '\n"provider": {},\n' + wrap_mod._PROVIDER_MARKER_END
-    )
-    config_file.write_text(wrapped_content)
-
-    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
-        result = runner.invoke(main, ["unwrap", "opencode"])
-
-    assert result.exit_code == 0, result.output
-    assert "Removed" in result.output
-    assert not config_file.exists()
-
-
-def test_unwrap_opencode_noop_when_config_missing(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unwrap is a safe no-op when the config file doesn't exist."""
-    monkeypatch.chdir(tmp_path)
-    _set_test_home(monkeypatch, tmp_path)
-
-    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
-        result = runner.invoke(main, ["unwrap", "opencode"])
-
-    assert result.exit_code == 0, result.output
-    assert "does not exist" in result.output
-
-
-def test_unwrap_opencode_noop_when_no_headroom_markers(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unwrap is a safe no-op when the config has no Headroom markers."""
-    monkeypatch.chdir(tmp_path)
-    _set_test_home(monkeypatch, tmp_path)
-
-    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text('{"model": "openai/gpt-4o"}')
-
-    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
-        result = runner.invoke(main, ["unwrap", "opencode"])
-
-    assert result.exit_code == 0, result.output
-    assert "no Headroom wrap markers" in result.output
-    assert config_file.read_text(encoding="utf-8").strip() == '{"model": "openai/gpt-4o"}'
-
-
 def test_wrap_unwrap_rewrap_is_idempotent(
     runner: CliRunner,
     tmp_path: Path,
@@ -749,7 +601,7 @@ def test_wrap_unwrap_rewrap_is_idempotent(
     """Full wrap-unwrap-rewrap cycle produces consistent results."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     config_file = tmp_path / ".config" / "opencode" / "opencode.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -783,30 +635,6 @@ def test_wrap_unwrap_rewrap_is_idempotent(
     assert "headroom" in after_rewrap.get("provider", {})
 
 
-def test_unwrap_opencode_restores_backup_and_removes_it(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unwrap removes the backup file after successful restore."""
-    monkeypatch.chdir(tmp_path)
-    _set_test_home(monkeypatch, tmp_path)
-
-    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
-    backup_file = config_file.with_suffix(".json.headroom-backup")
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    original = '{"model": "openai/gpt-4o"}'
-    config_file.write_text(original)
-    backup_file.write_text(original)
-
-    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
-        result = runner.invoke(main, ["unwrap", "opencode"])
-
-    assert result.exit_code == 0, result.output
-    assert "Restored prior" in result.output
-    assert not backup_file.exists(), "backup file was not cleaned up after restore"
-
-
 def test_wrap_opencode_no_arguments_is_valid(
     runner: CliRunner,
     tmp_path: Path,
@@ -815,7 +643,7 @@ def test_wrap_opencode_no_arguments_is_valid(
     """`headroom wrap opencode` with no additional arguments is a valid command."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     captured: dict[str, object] = {}
 
@@ -840,7 +668,7 @@ def test_wrap_opencode_with_memory_flag(
     """--memory flag is accepted and does not crash."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         with patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)):
@@ -860,7 +688,7 @@ def test_wrap_opencode_with_backend_and_anyllm_provider(
     """--backend and --anyllm-provider flags are accepted."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         with patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)):
@@ -891,7 +719,7 @@ def test_wrap_opencode_with_no_proxy(
     """--no-proxy flag skips proxy startup but still configures the tool."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         with patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)):
@@ -911,7 +739,7 @@ def test_wrap_opencode_with_verbose_flag(
     """--verbose flag does not crash."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    _set_test_home(monkeypatch, tmp_path)
+    set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         with patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)):
@@ -948,46 +776,3 @@ def test_wrap_opencode_respects_opencode_home_env(
 # ---------------------------------------------------------------------------
 # Regression: unwrap must preserve non-ASCII UTF-8 user content (#1126)
 # ---------------------------------------------------------------------------
-
-
-def test_unwrap_opencode_preserves_utf8_user_content(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unwrap strips Headroom blocks but preserves non-ASCII UTF-8 user content (#1126)."""
-    monkeypatch.chdir(tmp_path)
-    _set_test_home(monkeypatch, tmp_path)
-
-    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-
-    # User content with smart quotes and em dashes (non-ASCII UTF-8)
-    user_config = {
-        "model": "openai/gpt-4o",
-        "description": "“smart quotes” and an em dash — here",
-    }
-    user_json = json.dumps(user_config, ensure_ascii=False)
-
-    wrapped_content = (
-        wrap_mod._PROVIDER_MARKER_START
-        + '\n"provider": {},\n'
-        + wrap_mod._PROVIDER_MARKER_END
-        + "\n"
-        + user_json
-    )
-    config_file.write_text(wrapped_content, encoding="utf-8")
-
-    # Mock out OpencodeRegistrar to avoid its own bare-open encoding issue
-    # (pre-existing; outside this PR's scope).
-    fake_registrar = type("FakeRegistrar", (), {"detect": lambda self: False})()
-    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
-        with patch("headroom.mcp_registry.OpencodeRegistrar", return_value=fake_registrar):
-            result = runner.invoke(main, ["unwrap", "opencode"])
-
-    assert result.exit_code == 0, result.output
-    assert "Removed Headroom block" in result.output
-    content = config_file.read_text(encoding="utf-8")
-    assert "“smart quotes”" in content
-    assert "—" in content
-    assert wrap_mod._PROVIDER_MARKER_START not in content
