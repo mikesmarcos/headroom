@@ -34,13 +34,16 @@ def _compression_result(content: str, compressed: str) -> RouterCompressionResul
 
 
 def _router() -> ContentRouter:
-    return ContentRouter(
+    router = ContentRouter(
         ContentRouterConfig(
             protect_recent_code=0,
             protect_analysis_context=False,
             skip_user_messages=False,
         )
     )
+    # Isolate the compression deadline from the separate Read lifecycle pass.
+    router.config.read_lifecycle.enabled = False
+    return router
 
 
 def _messages() -> list[dict[str, str]]:
@@ -62,6 +65,7 @@ def test_single_cache_miss_fails_open_at_deadline(monkeypatch, caplog):
 
     monkeypatch.setattr(router, "compress", slow_compress)
     monkeypatch.setenv("HEADROOM_COMPRESSION_DEADLINE_MS", "10")
+    monkeypatch.setenv("HEADROOM_DETECT_BACKEND", "python")
 
     started = time.perf_counter()
     result = router.apply(

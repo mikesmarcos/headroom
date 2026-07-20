@@ -1007,13 +1007,20 @@ def verify_opencode_wrap(base_env: dict[str, str], project_dir: Path, log_dir: P
         "Opencode wrap should inject headroom provider baseURL",
     )
 
+    config_path = Path(base_env["HOME"]) / ".config" / "opencode" / "opencode.json"
+    backup_path = config_path.with_suffix(".json.headroom-backup")
+    assert_true(config_path.exists(), "Opencode wrap should create its config via MCP setup")
+    assert_true(
+        not backup_path.exists(),
+        "Opencode wrap must not snapshot MCP-created config as the pre-wrap backup",
+    )
+
     run(
         ["headroom", "unwrap", "opencode", "--port", str(port)],
         env=base_env,
         cwd=project_dir,
         timeout=120,
     )
-    config_path = Path(base_env["HOME"]) / ".config" / "opencode" / "opencode.json"
     if config_path.exists():
         content = config_path.read_text(encoding="utf-8")
         assert_true(

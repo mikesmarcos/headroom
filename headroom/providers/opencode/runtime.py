@@ -20,6 +20,7 @@ import os
 from collections.abc import Mapping
 from ipaddress import ip_address
 from pathlib import Path
+from typing import Any
 
 from headroom.mcp_registry.install import DEFAULT_PROXY_URL
 
@@ -170,7 +171,7 @@ def build_opencode_config_content(
     env: Mapping[str, str] | None = None,
     include_mcp: bool = True,
     include_plugin: bool = True,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Build JSON payload for ``OPENCODE_CONFIG_CONTENT``.
 
     ``host`` must be the canonical, client-reachable proxy host (the value
@@ -202,7 +203,7 @@ def build_opencode_config_content(
     """
     authority = headroom_url_authority(host)
     base_url = proxy_base_url(port, host)
-    config: dict[str, object] = {
+    config: dict[str, Any] = {
         "provider": {
             "anthropic": {"options": {"baseURL": base_url}},
             "openai": {"options": {"baseURL": base_url}},

@@ -2096,3 +2096,122 @@ class TestCSharpSupport:
         lang, confidence = detect_language(code)
         assert lang == CodeLanguage.CSHARP
         assert confidence > 0.0
+
+
+@pytest.mark.skipif(not TREE_SITTER_INSTALLED, reason="tree-sitter-languages not installed")
+class TestBraceLanguageNormalization:
+    """Regression coverage for the non-Python / brace-language validation path
+    inside ``_compress_function_ast_safely``.
+
+    Two findings from the independent review:
+
+    1. A definition whose AST rewrite fails validation must be preserved
+       verbatim, while a valid neighboring definition can still be compressed
+       and returned (the bad rewrite can't poison the whole file's output).
+    2. The normalization round-trip must preserve whitespace inside multiline
+       string/template literals for brace-delimited languages -- the previous
+       ``textwrap.dedent``/``textwrap.indent`` over raw text used to add the
+       definition's own indentation to flush-left / low-indented lines that
+       appeared inside a template literal, corrupting the literal content.
+    """
+
+    def _compressor(self):
+        return CodeAwareCompressor(
+            CodeCompressorConfig(
+                min_tokens_for_compression=10,
+                enable_ccr=False,
+            )
+        )
+
+    def test_invalid_javascript_rewrite_preserved_neighbor_compressed(self):
+        """Forcing a bad rewrite for one JS function leaves it preserved while
+        a valid sibling is still compressed."""
+        from headroom.transforms.code_compressor import _get_definition_name
+
+        code = (
+            "function keepNeighbor(arg) {\n"
+            "    var a = arg + 1;\n"
+            "    var b = a * 2;\n"
+            "    var c = b - 3;\n"
+            "    var d = c / 4;\n"
+            "    var e = d + 5;\n"
+            "    return e;\n"
+            "}\n"
+            "\n"
+            "function victim(input) {\n"
+            "    var x = input + 1;\n"
+            "    var y = x * 2;\n"
+            "    var z = y - 3;\n"
+            "    var w = z / 4;\n"
+            "    var v = w + 5;\n"
+            "    return v;\n"
+            "}\n"
+        )
+        compressor = self._compressor()
+        real_compress_fn = compressor._compress_function_ast
+
+        def fake_compress_fn(node, *args, **kwargs):
+            res = real_compress_fn(node, *args, **kwargs)
+            if (_get_definition_name(node) or "") == "victim":
+                # Inject malformed JS body (bare `=` with no RHS) so the
+                # brace-language validation path rejects the rewrite.
+                return "function victim(input) {\n    var oops = ;\n}\n"
+            return res
+
+        with patch.object(compressor, "_compress_function_ast", side_effect=fake_compress_fn):
+            result = compressor.compress(code, language="javascript")
+
+        # Whole-output validation must pass (victim preserved, keepNeighbor compressed).
+        assert result.syntax_valid is True
+        # The valid neighbor was compressed -- its body got truncated.
+        assert "function keepNeighbor(arg)" in result.compressed
+        assert "lines omitted" in result.compressed
+        # The neighbor's truncated tail (the `return e;` line) is gone.
+        assert "return e;" not in result.compressed
+        # The invalid victim definition is preserved verbatim, original body intact.
+        assert "function victim(input) {" in result.compressed
+        assert "var x = input + 1;" in result.compressed
+        assert "var y = x * 2;" in result.compressed
+        assert "return v;" in result.compressed
+        # The malformed injected body was NOT emitted.
+        assert "var oops = ;" not in result.compressed
+
+    def test_javascript_template_literal_flush_whitespace_preserved(self):
+        """A flush-left line inside a JS template literal in a nested
+        (indented) method must keep its exact column-0 indentation.
+
+        The old ``textwrap.dedent``/``textwrap.indent`` normalization used to
+        add the method's own line prefix to such a line, corrupting the
+        template literal's string content. The exact-prefix round-trip only
+        re-applies the prefix to lines that originally started with it.
+        """
+        code = (
+            "class Builder {\n"
+            "  makeIt() {\n"
+            "    const tpl = `\n"
+            "flush_left\n"
+            "    indented\n"
+            "        deeper\n"
+            "    `;\n"
+            "    var a = 1;\n"
+            "    var b = a + 2;\n"
+            "    var c = b * 3;\n"
+            "    var d = c - 4;\n"
+            "    var e = d + 5;\n"
+            "    var f = e - 6;\n"
+            "    var g = f * 7;\n"
+            "    return tpl + a + b + c + d + e + f + g;\n"
+            "  }\n"
+            "}\n"
+        )
+        result = self._compressor().compress(code, language="javascript")
+
+        assert result.syntax_valid is True
+        # Template literal content survived exactly -- the flush-left line
+        # stays at column 0 (no added method indentation).
+        assert "\nflush_left\n    indented\n        deeper\n    `;" in result.compressed
+        # Specifically: the flush-left line was not given the method's own
+        # indentation (`  `, 2 spaces).
+        assert "\n  flush_left\n" not in result.compressed
+        # The deeper-indented content also kept its exact whitespace.
+        assert "        deeper\n" in result.compressed
