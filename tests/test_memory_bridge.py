@@ -551,7 +551,8 @@ class TestRoundTrip:
         md_path.write_text(CLAUDE_CODE_MEMORY, encoding="utf-8")
 
         # Import
-        await bridge.import_from_markdown(paths=[md_path], user_id="test_user")
+        stats = await bridge.import_from_markdown(paths=[md_path], user_id="test_user")
+        skip_if_offline_bridge_import_failed(stats)
 
         # Export
         export_path = tmp_dir / "exported.md"
