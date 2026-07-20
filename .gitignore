@@ -252,9 +252,17 @@ headroom-managed/
 
 # uv lockfile: regenerated locally; not committed
 uv.lock
-# Graphify 
+
+# Graphify: machine-local sidecars (never committed)
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+graphify-out/.vocab.txt
+
+# Graphify: regenerable transient outputs (persistent outputs are versioned)
 graphify-out/cost.json
 graphify-out/cache/
+# Graphify incremental-update backups (YYYY-MM-DD directories)
+graphify-out/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
 
 # Rust extension `.so` symlinks placed by `scripts/build_rust_extension.sh`
 # into the `headroom/` package dir for local development. The real binary
