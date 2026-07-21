@@ -39,7 +39,7 @@ jobs:
             'uvicorn>=0.23.0' \
             'httpx[http2]>=0.24.0' \
             'openai>=2.14.0' \
-            'mcp>=1.0.0' \
+            'mcp>=1.28.1,<2' \
             'magika>=0.6.0' \
             'zstandard>=0.20.0' \
             'websockets>=13.0' \
@@ -103,7 +103,7 @@ jobs:
             'uvicorn>=0.23.0' \
             'httpx[http2]>=0.24.0' \
             'openai>=2.14.0' \
-            'mcp>=1.0.0' \
+            'mcp>=1.28.1,<2' \
             'magika>=0.6.0' \
             'zstandard>=0.20.0' \
             'websockets>=13.0' \

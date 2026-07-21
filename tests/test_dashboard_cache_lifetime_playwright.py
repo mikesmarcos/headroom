@@ -1,12 +1,4 @@
-"""Playwright validation for the persisted lifetime Cache Reads tile.
-
-The Prefix Cache Impact card historically rendered only from in-memory
-session counters, so every proxy restart blanked the operator's cache
-savings. These tests pin the durable behavior: the card renders from
-``persistent_savings.lifetime.cache_read_tokens`` alone after a restart
-with zero traffic, session-scoped tiles read "no activity since restart",
-and the card stays hidden when neither session nor lifetime data exists.
-"""
+"""Playwright validation for persisted lifetime cache metrics."""
 
 from __future__ import annotations
 
@@ -55,6 +47,20 @@ def _install_dashboard_routes(page: Page, stats: dict) -> None:
         if "/stats-history" in path:
             route.fulfill(status=200, content_type="application/json", body=json.dumps(history))
             return
+        if path == "/stats-lifetime":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "prefix_cache": {
+                            "cache_read_tokens": 629_537_547,
+                            "cache_write_tokens": 420_000,
+                        }
+                    }
+                ),
+            )
+            return
         if path.endswith("/stats"):
             route.fulfill(status=200, content_type="application/json", body=json.dumps(stats))
             return
@@ -72,22 +78,15 @@ def _open_dashboard(page: Page, stats: dict) -> None:
     page.wait_for_load_state("networkidle")
 
 
-def test_card_renders_lifetime_cache_reads_after_zero_traffic_restart() -> None:
+def test_lifetime_view_renders_persisted_cache_reads_after_zero_traffic_restart() -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1440, "height": 1600})
         _open_dashboard(page, _stats_lifetime_only())
+        page.get_by_role("button", name="Lifetime", exact=True).click()
 
-        expect(page.get_by_text("Prefix Cache Impact", exact=True)).to_be_visible()
-        expect(page.get_by_text("Cache Reads (lifetime)", exact=True)).to_be_visible()
-        expect(page.get_by_text("629.5M", exact=True)).to_be_visible()
-        expect(page.get_by_text("$7.20 saved")).to_be_visible()
-        # Session-scoped siblings read as inactive, not as literal zeros.
-        expect(page.get_by_text("no activity since restart").first).to_be_visible()
-        assert page.get_by_text("no activity since restart").count() >= 5
-        # x-show hides via CSS (element stays in the DOM), so assert
-        # visibility, not count — unlike the x-if card gate below.
-        expect(page.get_by_text("Cache Efficiency", exact=True)).to_be_hidden()
+        expect(page.get_by_text("Prefix Cache", exact=True)).to_be_visible()
+        expect(page.get_by_text("629.5M / 420.0k", exact=True)).to_be_visible()
 
         browser.close()
 

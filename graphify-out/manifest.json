@@ -1195,8 +1195,8 @@
     "semantic_hash": ""
   },
   "e2e/wrap/run.py": {
-    "mtime": 1784055445.7558932,
-    "ast_hash": "10dcb3a3bafca254fca8c83faf3fd93d",
+    "mtime": 1784583793.3433623,
+    "ast_hash": "ed74ba709928225c2fa99f10fee7b3a0",
     "semantic_hash": ""
   },
   "headroom/__init__.py": {
@@ -1530,8 +1530,8 @@
     "semantic_hash": ""
   },
   "headroom/cli/wrap.py": {
-    "mtime": 1784155453.3012998,
-    "ast_hash": "699c29d1e82a1c93f4c326e3276a686b",
+    "mtime": 1784314151.7743115,
+    "ast_hash": "9ca38c0dc0352afa7dfbff15ae81b29f",
     "semantic_hash": ""
   },
   "headroom/cli/wrap_rtk_metrics.py": {
@@ -2415,8 +2415,8 @@
     "semantic_hash": ""
   },
   "headroom/pricing/deepseek_prices.py": {
-    "mtime": 1783370224.1591191,
-    "ast_hash": "eea95f51abf0da35d8aa4f0ffe8d4d1f",
+    "mtime": 1784583793.34374,
+    "ast_hash": "857f1a3ec4abca0c87e0336dc3de53b3",
     "semantic_hash": ""
   },
   "headroom/pricing/litellm_model_resolution.py": {
@@ -2670,18 +2670,18 @@
     "semantic_hash": ""
   },
   "headroom/providers/opencode/config.py": {
-    "mtime": 1784055445.8128939,
-    "ast_hash": "db5665ee5b29185c48045d3e47152131",
+    "mtime": 1784584003.2322083,
+    "ast_hash": "49e8d648c738807c579ed8a2cb08b65c",
     "semantic_hash": ""
   },
   "headroom/providers/opencode/install.py": {
-    "mtime": 1784160814.6554203,
-    "ast_hash": "dce0f2fbcd86063be10f484db97e8af0",
+    "mtime": 1784316804.8213456,
+    "ast_hash": "df3e97ac6d687f94d930a755d183b7db",
     "semantic_hash": ""
   },
   "headroom/providers/opencode/runtime.py": {
-    "mtime": 1784160814.6556962,
-    "ast_hash": "06f835259efb24870c3c82dc674980a1",
+    "mtime": 1784241408.6667333,
+    "ast_hash": "71cbb225c8b0ae3e6d8406ababfd5bc9",
     "semantic_hash": ""
   },
   "headroom/providers/proxy_routes.py": {
@@ -3420,8 +3420,8 @@
     "semantic_hash": ""
   },
   "headroom/transforms/code_compressor.py": {
-    "mtime": 1784116292.2386644,
-    "ast_hash": "49750a3920b0fe0b9545c6617de8f844",
+    "mtime": 1784416377.125755,
+    "ast_hash": "680fa5b1165f57d3ac22d62630f1465b",
     "semantic_hash": ""
   },
   "headroom/transforms/compression_policy.py": {
@@ -4392,6 +4392,41 @@
   "headroom/dashboard/templates/settings.html": {
     "mtime": 1784140010.4715595,
     "ast_hash": "79bd0c47c83f15227aa6fdc636002ff0",
+    "semantic_hash": ""
+  },
+  ".serena/memories/conventions.md": {
+    "mtime": 1784317639.979809,
+    "ast_hash": "4b8eed429c49e2e70a31b728ba7c2dfd",
+    "semantic_hash": ""
+  },
+  ".serena/memories/core.md": {
+    "mtime": 1784317639.8468418,
+    "ast_hash": "97a7adca2b34cd0bb03d1daf7ff6b0b5",
+    "semantic_hash": ""
+  },
+  ".serena/memories/memory_maintenance.md": {
+    "mtime": 1784055445.7278726,
+    "ast_hash": "5a2422d8355cb91f16402415a54e3c66",
+    "semantic_hash": ""
+  },
+  ".serena/memories/suggested_commands.md": {
+    "mtime": 1784317639.9702754,
+    "ast_hash": "b12211308d4811ee7315fbb72fcdf8b2",
+    "semantic_hash": ""
+  },
+  ".serena/memories/task_completion.md": {
+    "mtime": 1784317640.0863495,
+    "ast_hash": "b92705510e55ce9a7b1a423e591c8f72",
+    "semantic_hash": ""
+  },
+  ".serena/memories/tech_stack.md": {
+    "mtime": 1784317639.9596684,
+    "ast_hash": "6c270e1fa530ee6202a76e6ebd798e9d",
+    "semantic_hash": ""
+  },
+  ".serena/project.yml": {
+    "mtime": 1784055445.732893,
+    "ast_hash": "a9cb4474841e0b9d16ab7418c337dd74",
     "semantic_hash": ""
   }
 }

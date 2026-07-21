@@ -5,7 +5,7 @@ from datetime import date
 from .registry import ModelPricing, PricingRegistry
 
 # Last verified date for pricing information
-LAST_UPDATED = date(2026, 6, 19)
+LAST_UPDATED = date(2026, 7, 20)
 
 # Official pricing page
 SOURCE_URL = "https://api-docs.deepseek.com/quick_start/pricing"

@@ -646,9 +646,11 @@ _LANGUAGE_PREFILTER: dict[CodeLanguage, list[re.Pattern[str]]] = {
         re.compile(r"::\w+", re.MULTILINE),
     ],
     CodeLanguage.PERL: [
-        re.compile(r"^\s*(sub|package|use|require)\s+[\w:]+", re.MULTILINE),
-        re.compile(r"^\s*(my|our|local)\s+[\$@%]", re.MULTILINE),
-        re.compile(r"[\$@%]\w+", re.MULTILINE),
+        re.compile(r"^\s*sub\s+[\w:]+", re.MULTILINE),
+        re.compile(
+            r"^\s*(my|our|local)\s+(?:[\$@%]|\([^)]*[\$@%])",
+            re.MULTILINE,
+        ),
     ],
     CodeLanguage.CSHARP: [
         re.compile(r"^\s*using\s+[\w.]+\s*;", re.MULTILINE),
@@ -703,6 +705,21 @@ def detect_language(code: str) -> tuple[CodeLanguage, float]:
 
     if not candidates:
         return CodeLanguage.UNKNOWN, 0.0
+
+    # Perl is intentionally detected from two independent syntax signals
+    # without asking tree-sitter to parse it. The parser remains available
+    # through _get_parser() for callers that need it directly.
+    if CodeLanguage.PERL in candidates:
+        perl_signals = sum(
+            bool(pattern.search(sample)) for pattern in _LANGUAGE_PREFILTER[CodeLanguage.PERL]
+        )
+        if perl_signals < 2:
+            candidates.pop(CodeLanguage.PERL)
+            if not candidates:
+                return CodeLanguage.UNKNOWN, 0.0
+        else:
+            score = candidates[CodeLanguage.PERL]
+            return CodeLanguage.PERL, min(1.0, 0.3 + (score * 0.1))
 
     # Disambiguation: TypeScript superset of JavaScript
     if CodeLanguage.TYPESCRIPT in candidates and CodeLanguage.JAVASCRIPT in candidates:
@@ -1143,6 +1160,26 @@ class CodeAwareCompressor(Transform):
                     syntax_valid=True,
                 )
 
+        # Perl is detected for routing purposes, but is not compressed through
+        # the AST path. Keep direct _get_parser("perl") support for callers
+        # that explicitly need the grammar.
+        if detected_lang == CodeLanguage.PERL:
+            if self.config.fallback_to_kompress:
+                result = self._fallback_compress(code, original_tokens)
+                result.language = detected_lang
+                result.language_confidence = confidence
+                return result
+            return CodeCompressionResult(
+                compressed=code,
+                original=code,
+                original_tokens=original_tokens,
+                compressed_tokens=original_tokens,
+                compression_ratio=1.0,
+                language=detected_lang,
+                language_confidence=confidence,
+                syntax_valid=True,
+            )
+
         # Check if tree-sitter is available
         if not _check_tree_sitter_available():
             logger.warning("tree-sitter not available. Install with: pip install headroom-ai[code]")
@@ -1361,7 +1398,7 @@ class CodeAwareCompressor(Transform):
                         or child.type in lang_config.class_nodes
                     ):
                         has_func_or_class = True
-                        compressed = self._compress_function_ast(
+                        compressed = self._compress_function_ast_safely(
                             child, code, language, lang_config, body_limits, analysis
                         )
                         # Reconstruct export with compressed inner definition
@@ -1385,7 +1422,7 @@ class CodeAwareCompressor(Transform):
                     if child.type == "decorator":
                         decorator_text.append(_get_node_text(child, code))
                     elif child.type in lang_config.function_nodes:
-                        definition_compressed = self._compress_function_ast(
+                        definition_compressed = self._compress_function_ast_safely(
                             child, code, language, lang_config, body_limits, analysis
                         )
                     elif child.type in lang_config.class_nodes:
@@ -1409,7 +1446,7 @@ class CodeAwareCompressor(Transform):
             # Function/method definitions
             if node_type in lang_config.function_nodes:
                 leading = _get_leading_comment_text(node, code, captured_byte_ranges)
-                compressed = self._compress_function_ast(
+                compressed = self._compress_function_ast_safely(
                     node, code, language, lang_config, body_limits, analysis
                 )
                 structure.function_signatures.append(leading + compressed)
@@ -1497,6 +1534,72 @@ class CodeAwareCompressor(Transform):
                         structure.top_level_code.append(text)
 
         return structure
+
+    def _compress_function_ast_safely(
+        self,
+        node: Any,
+        code: str,
+        language: CodeLanguage,
+        lang_config: LangConfig,
+        body_limits: dict[str, int],
+        analysis: _SymbolAnalysis,
+    ) -> str:
+        """Keep a definition unchanged if its AST rewrite is not valid.
+
+        Normalization for validation strips (and re-applies) *exactly* the
+        definition's own leading line prefix, never the common-prefix of all
+        lines. ``textwrap.dedent``/``textwrap.indent`` over the raw multiline
+        text used to:
+
+        * strip more than the definition's prefix when every line shared extra
+          indentation (e.g. nested defs), and
+        * collapse to a no-op when a line inside a multiline string/template
+          literal had *less* leading whitespace than the definition, after
+          which ``textwrap.indent`` happily re-applied the prefix to that
+          literal content -- corrupting braces-language template literals.
+
+        The exact-prefix round-trip only touches lines that actually started
+        with the definition's indentation, so whitespace inside multiline
+        string/template literals is preserved verbatim and no whitespace is
+        added to blank lines.
+        """
+        source_line = code.split("\n")[node.start_point[0]]
+        line_indent = source_line[: len(source_line) - len(source_line.lstrip())]
+        original_text = _get_node_text(node, code)
+        original = (
+            original_text if original_text.startswith(line_indent) else line_indent + original_text
+        )
+        validation_completed = False
+        try:
+            compressed = self._compress_function_ast(
+                node, code, language, lang_config, body_limits, analysis
+            )
+            if not isinstance(compressed, str):
+                return original
+
+            standalone, prefix_mask = _strip_definition_prefix(compressed, line_indent)
+            source_bytes = code.encode("utf-8")
+            if language == CodeLanguage.PYTHON:
+                valid = self._verify_syntax(standalone, language)
+            else:
+                candidate = (
+                    source_bytes[: node.start_byte]
+                    + standalone.encode("utf-8")
+                    + source_bytes[node.end_byte :]
+                ).decode("utf-8")
+                valid = self._verify_syntax(candidate, language)
+            validation_completed = True
+            if valid:
+                return _reapply_definition_prefix(standalone, line_indent, prefix_mask)
+        except Exception as exc:
+            logger.warning("AST function compression failed locally: %s", exc)
+
+        if validation_completed:
+            logger.warning(
+                "AST function compression produced invalid syntax for %s; preserving definition",
+                _get_definition_name(node) or "<anonymous>",
+            )
+        return original
 
     # =========================================================================
     # Unified function/class compression (data-driven)
@@ -1834,7 +1937,7 @@ class CodeAwareCompressor(Transform):
 
             # Methods/functions inside the class — compress individually
             if child.type in lang_config.function_nodes:
-                compressed = self._compress_function_ast(
+                compressed = self._compress_function_ast_safely(
                     child, code, language, lang_config, body_limits, analysis
                 )
                 body_parts.append(compressed)
@@ -1849,7 +1952,7 @@ class CodeAwareCompressor(Transform):
                         deco_end = deco_child.end_point[0]
                         decorator_lines.append("\n".join(code_lines[deco_start : deco_end + 1]))
                     elif deco_child.type in lang_config.function_nodes:
-                        method_compressed = self._compress_function_ast(
+                        method_compressed = self._compress_function_ast_safely(
                             deco_child, code, language, lang_config, body_limits, analysis
                         )
                 if decorator_lines and method_compressed:
@@ -2191,6 +2294,54 @@ def _slice_code_bytes(code: str, start_byte: int, end_byte: int) -> str:
 def _get_node_text(node: Any, code: str) -> str:
     """Extract text from AST node."""
     return _slice_code_bytes(code, node.start_byte, node.end_byte)
+
+
+def _strip_definition_prefix(text: str, prefix: str) -> tuple[str, list[bool]]:
+    """Strip ``prefix`` from each line that starts with it.
+
+    Returns ``(standalone, mask)`` where ``mask[i]`` is ``True`` iff line ``i``
+    started with ``prefix`` and should get it back on re-apply (see
+    :func:`_reapply_definition_prefix`).
+
+    Unlike :func:`textwrap.dedent`, this only removes the *exact* definition
+    prefix. Lines inside multiline string/template literals rarely start with
+    the definition's own indentation, so they survive untouched -- which is
+    what preserves their whitespace through the round-trip.
+    """
+    lines = text.split("\n")
+    standalone_lines: list[str] = []
+    mask: list[bool] = []
+    if not prefix:
+        return text, [False] * len(lines)
+    for line in lines:
+        if line.startswith(prefix):
+            mask.append(True)
+            standalone_lines.append(line[len(prefix) :])
+        else:
+            mask.append(False)
+            standalone_lines.append(line)
+    return "\n".join(standalone_lines), mask
+
+
+def _reapply_definition_prefix(standalone: str, prefix: str, mask: list[bool]) -> str:
+    """Inverse of :func:`_strip_definition_prefix`.
+
+    Re-adds ``prefix`` only to the lines flagged in ``mask`` (i.e. the ones
+    that originally had it). Blank lines and lines that were not prefixed --
+    including low-indented content inside multiline string/template literals --
+    stay unchanged, so the round-trip preserves whitespace exactly and never
+    adds whitespace to blank lines.
+    """
+    if not prefix:
+        return standalone
+    lines = standalone.split("\n")
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        if i < len(mask) and mask[i]:
+            out.append(prefix + line)
+        else:
+            out.append(line)
+    return "\n".join(out)
 
 
 _COMMENT_NODE_TYPES = frozenset({"comment", "line_comment", "block_comment"})

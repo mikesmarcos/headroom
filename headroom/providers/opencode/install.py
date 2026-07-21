@@ -2,30 +2,31 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from headroom import fsutil
 from headroom import paths as _paths
 from headroom._subprocess import run
 from headroom.install.models import ConfigScope, DeploymentManifest, ManagedMutation, ToolTarget
 from headroom.install.paths import opencode_config_path
-from headroom.mcp_registry.install import DEFAULT_PROXY_URL
 
 from .config import (
-    _inject_key_into_json,
-    _parse_json_loose,
-    headroom_provider_entry,
-    headroom_url_authority,
+    ConfigFileAction,
+    _parse_json_loose_optional,
+    apply_config_overlay,
+    cleanup_legacy_persistent_config,
+    cleanup_opencode_wrap_content,
+    render_opencode_config,
+    revert_config_overlay,
     snapshot_opencode_config_if_unwrapped,
-    strip_opencode_headroom_blocks,
 )
-from .runtime import headroom_opencode_plugin_path, proxy_base_url
+from .runtime import build_opencode_config_content
 
 # Well-known plugin artifact contract. The package version is intentionally
 # explicit: operational installs must not resolve mutable npm tags like latest.
@@ -160,84 +161,84 @@ def build_install_env(*, port: int, backend: str) -> dict[str, str]:
     }
 
 
+def _persistent_config_overlay(manifest: DeploymentManifest) -> dict[str, Any]:
+    tool_env = manifest.tool_envs.get(ToolTarget.OPENCODE.value, {})
+    artifact_dir = tool_env.get("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR")
+    if artifact_dir is None:
+        artifact_dir = os.environ.get("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", "")
+    artifact_env = {"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": artifact_dir}
+    return build_opencode_config_content(
+        port=manifest.port,
+        host=manifest.host,
+        env=artifact_env,
+    )
+
+
+def _persistent_cleanup_overlay(manifest: DeploymentManifest) -> dict[str, Any]:
+    """Build the old-manifest cleanup overlay without requiring the plugin."""
+    try:
+        return _persistent_config_overlay(manifest)
+    except RuntimeError:
+        # A missing optional artifact cannot justify retaining independent
+        # provider/MCP wiring.  It also cannot prove ownership of any plugin
+        # path, so leave plugin entries for the user rather than guessing.
+        return build_opencode_config_content(
+            port=manifest.port,
+            host=manifest.host,
+            env={},
+            include_plugin=False,
+        )
+
+
 def apply_provider_scope(manifest: DeploymentManifest) -> ManagedMutation | None:
-    """Apply OpenCode provider-scope configuration when requested."""
+    """Apply OpenCode provider-scope configuration when requested.
+
+    Raises
+    ------
+    RuntimeError
+        If a configured transport plugin artifact cannot be resolved.
+    """
     if manifest.scope != ConfigScope.PROVIDER.value:
         return None
 
     config_file = opencode_config_path()
     config_file.parent.mkdir(parents=True, exist_ok=True)
+    overlay = _persistent_config_overlay(manifest)
+
+    if config_file.exists():
+        try:
+            content = fsutil.read_text(config_file)
+        except OSError:
+            return None
+        data = {} if not content.strip() else _parse_json_loose_optional(content)
+        # A provider-scope install is a full JSON rewrite.  Never turn an
+        # unreadable or malformed existing config into an empty managed file,
+        # and do not create a backup for an apply that did not happen.
+        if data is None:
+            return None
+    else:
+        data = {}
 
     snapshot_opencode_config_if_unwrapped(
         config_file, config_file.with_suffix(".json.headroom-backup")
     )
 
-    if config_file.exists():
-        content = fsutil.read_text(config_file)
-        data = _parse_json_loose(content)
-    else:
-        data = {}
-
-    # Build proxy URL references (issue #18).
-    authority = headroom_url_authority(manifest.host)
-    base_url = proxy_base_url(manifest.port, manifest.host)
-    proxy_url = f"http://{authority}:{manifest.port}"
-
-    # Inject all three provider baseURL routes: keep native provider identity
-    # (model metadata, API keys) while routing all traffic through the proxy.
-    provider = {
-        "anthropic": {"options": {"baseURL": base_url}},
-        "openai": {"options": {"baseURL": base_url}},
-        "headroom": headroom_provider_entry(manifest.port, host=manifest.host),
-    }
-    data = _inject_key_into_json(data, "provider", provider)
-
-    # Inject MCP server config (issue #18). Use HEADROOM_PROXY_URL for
-    # non-default proxy URLs so the MCP server reaches the correct proxy.
-    mcp_entry: dict[str, object] = {
-        "type": "local",
-        "command": ["headroom", "mcp", "serve"],
-        "enabled": True,
-    }
-    if proxy_url != DEFAULT_PROXY_URL:
-        mcp_entry["environment"] = {"HEADROOM_PROXY_URL": proxy_url}
-    data = _inject_key_into_json(data, "mcp", {"headroom": mcp_entry})
-
-    # Inject plugin reference from managed operational artifact (issue #17).
-    tool_env = manifest.tool_envs.get(ToolTarget.OPENCODE.value, {})
-    if "HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR" in tool_env:
-        artifact_dir = tool_env["HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR"]
-    else:
-        artifact_dir = os.environ.get("HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR", "")
-    plugin_path = headroom_opencode_plugin_path(
-        env={"HEADROOM_OPENCODE_PLUGIN_ARTIFACT_DIR": artifact_dir}
-    )
-    if plugin_path:
-        plugins = data.get("plugin")
-        if isinstance(plugins, str):
-            plugins = [plugins]
-            data["plugin"] = plugins
-        if not isinstance(plugins, list):
-            plugins = []
-            data["plugin"] = plugins
-        if plugin_path not in plugins:
-            plugins.append(plugin_path)
-
-    config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    applied = apply_config_overlay(data, overlay)
+    config_file.write_text(render_opencode_config(applied.config), encoding="utf-8")
     return ManagedMutation(
         target=ToolTarget.OPENCODE.value,
         kind="json-block",
         path=str(config_file),
+        data={"version": 1, "operations": applied.operations},
     )
 
 
 def revert_provider_scope(mutation: ManagedMutation, manifest: DeploymentManifest) -> None:
     """Revert OpenCode provider-scope configuration.
 
-    Restores from pre-wrap backup when available, otherwise strips the
-    headroom provider from the config file.
+    Restores from pre-wrap backup when available, otherwise strips only
+    Headroom-managed plugin, provider, and MCP wiring from the config file.
     """
-    del manifest
     if not mutation.path:
         return
     path = Path(mutation.path)
@@ -252,8 +253,33 @@ def revert_provider_scope(mutation: ManagedMutation, manifest: DeploymentManifes
     if not path.exists():
         return
     content = fsutil.read_text(path)
-    cleaned = strip_opencode_headroom_blocks(content)
-    if cleaned:
-        path.write_text(cleaned + "\n", encoding="utf-8")
-    else:
+    data = _parse_json_loose_optional(content)
+    if data is None:
+        cleaned_content = cleanup_opencode_wrap_content(
+            content, _persistent_cleanup_overlay(manifest)
+        )
+        if cleaned_content.action is ConfigFileAction.WRITE and cleaned_content.config is not None:
+            path.write_text(render_opencode_config(cleaned_content.config), encoding="utf-8")
+        elif cleaned_content.action is ConfigFileAction.DELETE:
+            path.unlink(missing_ok=True)
+        return
+
+    mutation_data = mutation.data if isinstance(mutation.data, dict) else {}
+    operations = mutation_data.get("operations")
+    if mutation_data.get("version") == 1 and isinstance(operations, list):
+        reverted = revert_config_overlay(data, operations)
+        if not reverted.changed:
+            return
+        if reverted.config:
+            path.write_text(render_opencode_config(reverted.config), encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+        return
+
+    # Old manifests did not persist ownership. Exact canonical values are the
+    # only safe fallback; ambiguity intentionally leaves stale wiring behind.
+    cleaned = cleanup_legacy_persistent_config(data, _persistent_cleanup_overlay(manifest))
+    if cleaned.action is ConfigFileAction.WRITE and cleaned.config is not None:
+        path.write_text(render_opencode_config(cleaned.config), encoding="utf-8")
+    elif cleaned.action is ConfigFileAction.DELETE:
         path.unlink(missing_ok=True)

@@ -2,6 +2,7 @@
 node_modules/
 dist/
 *.generated.py
+.scratch/
 
 # only index src/, ignore everything else
 *
@@ -26,3 +27,14 @@ dist/
 !uv.lock
 !wiki/
 !wiki/**
+
+# Serena: traverse directory, deny all children, then re-allow project.yml and memories
+!.serena/
+.serena/*
+!.serena/project.yml
+!.serena/memories/
+!.serena/memories/**
+# Defense-in-depth: explicit denies (already covered by .serena/*)
+.serena/cache/
+.serena/cache/**
+.serena/project.local.yml
